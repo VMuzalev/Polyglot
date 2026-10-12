@@ -29,7 +29,14 @@ local loadReason = {}   -- локаль -> почему модуль не заг
 ---------------------------------------------------------------------------
 local STRINGS = {
     enUS = {
-        title = "Polyglot: item search",
+        title = "Polyglot",
+        tab_items = "Items", tab_places = "Places",
+        enter_place = "Enter a zone or dungeon name",
+        pin_remove = "Click: remove the mark",
+        place_hint = "Click: show on the map", no_map = "No map data for this place.",
+        no_places = "No place data in this version of the database. Update the addon.",
+        kind_c = "continent", kind_z = "zone", kind_s = "subzone", kind_d = "dungeon", kind_r = "raid",
+        kind_b = "battleground", kind_a = "arena",
         find = "Search",
         mode_strict = "Mode: strict", mode_loose = "Mode: loose",
         mode_tip = "Search mode",
@@ -54,6 +61,7 @@ local STRINGS = {
             .. "longer searched, and its memory is freed after /reload.",
         st_loaded = "loaded", st_loaded_until = "loaded until /reload", st_empty = "no data for this game version",
         st_missing = "not found: folder Polyglot_%s",
+        st_disabled = "disabled in the addon list: tick Polyglot_%s there and /reload",
         opt_minimap = "Show the minimap button",
         mm_tip_title = "Polyglot", mm_left = "Left-click: open / close", mm_right = "Right-click: language settings",
         mm_drag = "Drag: move the button",
@@ -78,9 +86,17 @@ local STRINGS = {
         help_5 = "/pg info - client build, database build and language status",
         help_6 = "In the window: Enter = search, star = favorite, Shift+click = link in chat, mouse wheel = pages.",
         help_7 = "/pg ui en|ru|auto - interface language",
+        help_8 = "/pg zone <name> - search zones and dungeons",
     },
     ruRU = {
-        title = "Polyglot: поиск предметов",
+        title = "Polyglot",
+        tab_items = "Предметы", tab_places = "Места",
+        enter_place = "Введите название зоны или подземелья",
+        pin_remove = "Клик: убрать метку",
+        place_hint = "Клик: показать на карте", no_map = "Для этого места нет данных карты.",
+        no_places = "В этой версии базы нет данных о местах. Обновите аддон.",
+        kind_c = "континент", kind_z = "зона", kind_s = "подзона", kind_d = "подземелье", kind_r = "рейд",
+        kind_b = "поле боя", kind_a = "арена",
         find = "Найти",
         mode_strict = "Режим: строгий", mode_loose = "Режим: нестрогий",
         mode_tip = "Режим поиска",
@@ -105,6 +121,7 @@ local STRINGS = {
             .. "участвовать в поиске, а память освободится после /reload.",
         st_loaded = "загружен", st_loaded_until = "загружен до /reload", st_empty = "нет данных для этой версии игры",
         st_missing = "не найден: папка Polyglot_%s",
+        st_disabled = "выключен в списке аддонов: включите Polyglot_%s там и сделайте /reload",
         opt_minimap = "Показывать кнопку у миникарты",
         mm_tip_title = "Polyglot", mm_left = "Левый клик: открыть / закрыть", mm_right = "Правый клик: языки поиска",
         mm_drag = "Перетаскивание: переместить кнопку",
@@ -129,6 +146,7 @@ local STRINGS = {
         help_5 = "/pg info - сборка клиента, сборка базы и состояние языков",
         help_6 = "В окне: Enter = поиск, звёздочка = избранное, Shift+клик = ссылка в чат, колесо мыши = страницы.",
         help_7 = "/pg ui en|ru|auto - язык интерфейса",
+        help_8 = "/pg zone <название> - поиск зон и подземелий",
     },
 }
 local CURRENT = STRINGS[GetLocale()] or STRINGS.enUS
@@ -182,7 +200,18 @@ local function EnsureLocale(loc)
     if PolyglotData[loc] then return true end
     local load = (C_AddOns and C_AddOns.LoadAddOn) or LoadAddOn
     if load then
-        local ok, loaded, reason = pcall(load, "Polyglot_" .. loc)
+        local name = "Polyglot_" .. loc
+        local ok, loaded, reason = pcall(load, name)
+        if ok and not loaded and reason == "DISABLED" then
+            -- модуль выключен в списке аддонов (например, раньше его отключили вручную): включаем и пробуем снова
+            local enable = (C_AddOns and C_AddOns.EnableAddOn) or EnableAddOn
+            local who = { false, UnitName and UnitName("player") or false, UnitGUID and UnitGUID("player") or false }
+            for _, character in ipairs(who) do
+                if enable then pcall(enable, name, character or nil) end
+                ok, loaded, reason = pcall(load, name)
+                if ok and loaded then break end
+            end
+        end
         if ok and not loaded then loadReason[loc] = reason end
     end
     return PolyglotData[loc] ~= nil
@@ -204,7 +233,8 @@ end
 -- Оценка (меньше = лучше): 1 точное, 2 начинается с запроса,
 --                          3 содержит запрос, 4 содержит все слова
 ---------------------------------------------------------------------------
-local function Search(query, strict)
+local function Search(query, strict, field)
+    field = field or "l"
     local words = {}
     for w in query:gmatch("%S+") do words[#words + 1] = w end
 
@@ -212,7 +242,7 @@ local function Search(query, strict)
     for _, loc in ipairs(ActiveLocales()) do
         local d = PolyglotData[loc]
         if d then
-            for id, name in pairs(d.l) do
+            for id, name in pairs(d[field] or {}) do
                 local score
                 if name == query then
                     score = 1
@@ -285,10 +315,11 @@ end
 local FRAME_W = 560
 local BODY_H = 360        -- высота области результатов
 local ROWS_COUNT = 7      -- сколько строк создано; сколько показано, зависит от числа языков
+local MAX_LINES, LINE_H = 13, 13   -- строк текста в результате (заголовок, тип, до 11 языков) и их высота
 local FAVORITE_ICON = "Interface\\TargetingFrame\\UI-RaidTargetingIcon_1"   -- жёлтая звезда
 
 local frame = CreateFrame("Frame", "PolyglotFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
-frame:SetSize(FRAME_W, 110 + BODY_H + 80)
+frame:SetSize(FRAME_W, 138 + BODY_H + 80)
 frame:SetPoint("CENTER")
 frame:SetFrameStrata("DIALOG")
 frame:SetBackdrop({
@@ -318,7 +349,7 @@ uiBtn:SetPoint("TOPLEFT", 16, -14)
 
 local edit = CreateFrame("EditBox", "PolyglotEditBox", frame, "InputBoxTemplate")
 edit:SetSize(400, 22)
-edit:SetPoint("TOPLEFT", 30, -48)
+edit:SetPoint("TOPLEFT", 30, -76)
 edit:SetAutoFocus(false)
 edit:SetMaxLetters(120)
 
@@ -329,7 +360,7 @@ searchBtn:SetText(T("find"))
 
 local modeBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
 modeBtn:SetSize(150, 24)
-modeBtn:SetPoint("TOPLEFT", 24, -78)
+modeBtn:SetPoint("TOPLEFT", 24, -106)
 
 local langBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
 langBtn:SetSize(95, 24)
@@ -346,9 +377,30 @@ status:SetPoint("BOTTOM", 0, 50)
 status:SetWidth(FRAME_W - 48)
 status:SetJustifyH("CENTER")
 
+-- Вкладки: предметы и места (зоны, подземелья)
+local tab = "items"
+local tabItemsBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+tabItemsBtn:SetSize(110, 24)
+tabItemsBtn:SetPoint("TOPLEFT", 24, -44)
+local tabPlacesBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+tabPlacesBtn:SetSize(110, 24)
+tabPlacesBtn:SetPoint("LEFT", tabItemsBtn, "RIGHT", 4, 0)
+
+local function UpdateTabs()
+    tabItemsBtn:SetText(T("tab_items"))
+    tabPlacesBtn:SetText(T("tab_places"))
+    -- выбранная вкладка недоступна для нажатия (так видно, где вы)
+    if tab == "items" then tabItemsBtn:Disable() else tabItemsBtn:Enable() end
+    if tab == "places" then tabPlacesBtn:Disable() else tabPlacesBtn:Enable() end
+end
+
+local PLACE_ICON = "Interface\\Icons\\INV_Misc_Map_01"
+
 local function UpdateModeText()
     modeBtn:SetText(db.strict and T("mode_strict") or T("mode_loose"))
 end
+
+local OpenPlaceMap   -- определена ниже (нужна кликам по строкам)
 
 -- Строки результатов (высота и положение задаются в Layout)
 local rows = {}
@@ -363,7 +415,18 @@ for i = 1, ROWS_COUNT do
     row.text:SetPoint("TOPLEFT", 54, -6)
     row.text:SetWidth(FRAME_W - 48 - 64 - 24)
     row.text:SetJustifyH("LEFT")
-    row.text:SetWordWrap(false)
+    row.text:Hide()   -- хранит весь текст строки целиком; на экране строки рисуются отдельно (row.lines)
+    -- Клиент обрезает многострочный текст до первой строки с многоточием, поэтому у каждой строки свой FontString
+    row.lines = {}
+    for j = 1, MAX_LINES do
+        local fs = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        fs:SetPoint("TOPLEFT", 54, -6 - (j - 1) * LINE_H)
+        fs:SetWidth(FRAME_W - 48 - 64 - 24)
+        fs:SetHeight(LINE_H)
+        fs:SetJustifyH("LEFT")
+        fs:SetWordWrap(false)
+        row.lines[j] = fs
+    end
 
     -- Звёздочка избранного
     row.star = CreateFrame("Button", nil, row)
@@ -375,6 +438,13 @@ for i = 1, ROWS_COUNT do
 
     row:SetScript("OnEnter", function(self)
         if not self.id then return end
+        if tab == "places" then
+            local en = PolyglotData.enUS
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:AddLine((en and en.mp and en.mp[self.id]) and T("place_hint") or T("no_map"), 1, 1, 1)
+            GameTooltip:Show()
+            return
+        end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         pcall(GameTooltip.SetHyperlink, GameTooltip, "item:" .. self.id)
         if self.link then
@@ -384,10 +454,19 @@ for i = 1, ROWS_COUNT do
     end)
     row:SetScript("OnLeave", function() GameTooltip:Hide() end)
     row:SetScript("OnClick", function(self)
+        if tab == "places" then
+            if self.id then OpenPlaceMap(self.id) end
+            return
+        end
         if self.link and HandleModifiedItemClick then HandleModifiedItemClick(self.link) end
     end)
     row:Hide()
     rows[i] = row
+end
+
+local function SetRowText(row, lines)
+    row.text:SetText(table.concat(lines, "\n"))
+    for j = 1, MAX_LINES do row.lines[j]:SetText(lines[j] or "") end
 end
 
 -- Высота строки зависит от числа включённых языков, от неё зависит число строк на странице
@@ -399,8 +478,9 @@ local function Layout()
     for i = 1, ROWS_COUNT do
         local row = rows[i]
         row:SetHeight(rowH)
+        row.text:SetHeight(rowH - 12)
         row:ClearAllPoints()
-        row:SetPoint("TOPLEFT", 24, -(110 + (i - 1) * rowH))
+        row:SetPoint("TOPLEFT", 24, -(138 + (i - 1) * rowH))
     end
 end
 
@@ -417,6 +497,7 @@ local function FavoriteCount()
 end
 
 local function UpdateFavBtn()
+    if tab == "places" then favBtn:Hide() else favBtn:Show() end
     favBtn:SetText(viewFav and T("fav_back") or T("favorites", FavoriteCount()))
 end
 
@@ -475,9 +556,38 @@ nextBtn:SetText(">")
 
 -- Заполняет строку: иконка, название из игры, тип, названия на включённых языках.
 -- Возвращает true, если данные из игры уже есть.
+local function FillPlaceRow(row)
+    local id = row.id
+    local en = PolyglotData.enUS
+    local kind = en and en.k and en.k[id]
+    local lines = {}
+    for _, loc in ipairs(ActiveLocales()) do
+        local d = PolyglotData[loc]
+        local nm = d and d.p and d.p[id]
+        if nm and nm ~= "" then lines[#lines + 1] = { loc, nm } end
+    end
+    row.icon:SetTexture(PLACE_ICON)
+    row.link = nil
+    -- заголовок: название на языке интерфейса аддона, если этот язык включён, иначе первое доступное
+    local uiLoc = (CURRENT == STRINGS.ruRU) and "ruRU" or "enUS"
+    local best = lines[1]
+    for _, pair in ipairs(lines) do
+        if pair[1] == uiLoc then best = pair break end
+    end
+    local head = best and ("|cffffd100" .. best[2] .. "|r") or ""
+    if kind then head = head .. "  |cff888888" .. T("kind_" .. kind) .. "|r" end
+    local out = { head }
+    for _, pair in ipairs(lines) do
+        out[#out + 1] = "|cffaaaaaa" .. pair[1] .. ":|r " .. pair[2]
+    end
+    SetRowText(row, out)
+    return true
+end
+
 local function FillRow(row)
     local id = row.id
     if not id then return true end
+    if tab == "places" then return FillPlaceRow(row) end
     local g = GetGameInfo(id)
 
     local names = {}   -- { {локаль, название}, ... } только по включённым языкам
@@ -512,7 +622,7 @@ local function FillRow(row)
     for _, pair in ipairs(names) do
         lines[#lines + 1] = "|cffaaaaaa" .. pair[1] .. ":|r " .. pair[2]
     end
-    row.text:SetText(table.concat(lines, "\n"))
+    SetRowText(row, lines)
     return g.name ~= nil
 end
 
@@ -530,6 +640,7 @@ local function ShowPage()
             row.id = r.id
             row.failed = false
             row.link = nil
+            if tab == "items" then row.star:Show() else row.star:Hide() end
             if not FillRow(row) and RequestLoad then
                 RequestLoad(r.id)   -- результат придёт в GET_ITEM_INFO_RECEIVED
             end
@@ -597,6 +708,21 @@ DoSearch = function()
     end
 
     local q = normalize(edit:GetText())
+    if tab == "places" then
+        local en = PolyglotData.enUS
+        if not (en.p and next(en.p)) then
+            ShowResults({})
+            status:SetText("|cffff8080" .. T("no_places") .. "|r")
+            return
+        end
+        if q == "" then
+            emptyKey = "enter_place"
+            ShowResults({})
+            return
+        end
+        ShowResults(Search(q, db.strict, "pl"))
+        return
+    end
     if viewFav then
         if FavoriteCount() == 0 then emptyKey = "fav_empty" end
         ShowResults(FavoriteList(q))
@@ -664,6 +790,88 @@ favBtn:SetScript("OnEnter", function(self)
 end)
 favBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
+---------------------------------------------------------------------------
+-- Места: открыть карту. Для подземелий ставится метка на входе.
+---------------------------------------------------------------------------
+local mapPin
+local function UpdatePin()
+    local want = mapPin and rawget(mapPin, "want")
+    if not want or not WorldMapFrame or not WorldMapFrame:IsShown() or WorldMapFrame:GetMapID() ~= want.map then
+        if mapPin then mapPin:Hide() end
+        return
+    end
+    local canvas = WorldMapFrame:GetCanvas()
+    mapPin:SetParent(canvas)
+    mapPin:ClearAllPoints()
+    mapPin:SetPoint("CENTER", canvas, "TOPLEFT", want.x * canvas:GetWidth(), -want.y * canvas:GetHeight())
+    mapPin:Show()
+end
+
+local function ShowPin(map, x, y)
+    if not mapPin then
+        mapPin = CreateFrame("Frame", nil, WorldMapFrame:GetCanvas())
+        mapPin:SetSize(40, 40)
+        mapPin:SetFrameStrata("TOOLTIP")   -- поверх значков карты
+        mapPin:EnableMouse(true)
+        mapPin.tex = mapPin:CreateTexture(nil, "OVERLAY")
+        mapPin.tex:SetAllPoints()
+        mapPin.tex:SetTexture("Interface\\TargetingFrame\\UI-RaidTargetingIcon_7")   -- красный крест
+        -- метка слегка мигает, чтобы её было видно, и снимается кликом
+        local t = 0
+        mapPin:SetScript("OnUpdate", function(self, dt)
+            t = t + (dt or 0)
+            self:SetAlpha(0.7 + 0.3 * math.sin(t * 6))
+        end)
+        mapPin:SetScript("OnMouseUp", function(self)
+            self.want = nil
+            self:Hide()
+            GameTooltip:Hide()
+        end)
+        mapPin:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:AddLine(T("pin_remove"), 1, 1, 1)
+            GameTooltip:Show()
+        end)
+        mapPin:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        -- метка скрывается, когда на карте открыто другое место, и снимается при закрытии карты
+        pcall(hooksecurefunc, WorldMapFrame, "OnMapChanged", UpdatePin)
+        pcall(WorldMapFrame.HookScript, WorldMapFrame, "OnHide", function()
+            if mapPin then mapPin.want = nil; mapPin:Hide() end
+        end)
+    end
+    mapPin.want = { map = map, x = x, y = y }
+    UpdatePin()
+    if C_Timer and C_Timer.After then C_Timer.After(0.1, UpdatePin) end   -- размер карты может обновиться позже
+end
+
+OpenPlaceMap = function(id)
+    local en = PolyglotData.enUS
+    local m = en and en.mp and en.mp[id]
+    if not m or not (WorldMapFrame and WorldMapFrame.SetMapID) then Print(T("no_map")) return end
+    local ok = pcall(function()
+        if not WorldMapFrame:IsShown() then
+            if ShowUIPanel then ShowUIPanel(WorldMapFrame) else WorldMapFrame:Show() end
+        end
+        WorldMapFrame:SetMapID(m[1])
+    end)
+    if not ok then Print(T("no_map")) return end
+    frame:Hide()   -- иначе карта открывается под окном аддона
+    if mapPin then mapPin.want = nil; mapPin:Hide() end
+    if m[2] and m[3] then pcall(ShowPin, m[1], m[2], m[3]) end
+end
+
+local function SetTab(name)
+    if tab == name then return end
+    tab = name
+    viewFav = false
+    UpdateTabs()
+    UpdateFavBtn()
+    DoSearch()
+end
+tabItemsBtn:SetScript("OnClick", function() SetTab("items") end)
+tabPlacesBtn:SetScript("OnClick", function() SetTab("places") end)
+UpdateTabs()
+
 -- При открытии окна сразу подгружаем данные включённых языков (один раз за сессию)
 frame:SetScript("OnShow", function()
     edit:SetFocus()
@@ -709,7 +917,11 @@ local function RefreshPanel()
         elseif d then
             text = enabled and ("|cff00ff00" .. T("st_loaded") .. "|r") or ("|cff888888" .. T("st_loaded_until") .. "|r")
         elseif enabled then
-            text = "|cffff8080" .. T("st_missing", loc) .. (loadReason[loc] and (" (" .. tostring(loadReason[loc]) .. ")") or "") .. "|r"
+            if loadReason[loc] == "DISABLED" then
+                text = "|cffff8080" .. T("st_disabled", loc) .. "|r"
+            else
+                text = "|cffff8080" .. T("st_missing", loc) .. (loadReason[loc] and (" (" .. tostring(loadReason[loc]) .. ")") or "") .. "|r"
+            end
         end
         statuses[loc]:SetText(text)
     end
@@ -854,6 +1066,7 @@ local function ApplyUILanguage()
     BINDING_NAME_POLYGLOT_TOGGLE = T("binding")
     uiBtn:SetText(CURRENT == STRINGS.ruRU and "RU" or "EN")
     UpdateModeText()
+    UpdateTabs()
     UpdateFavBtn()
     RefreshPanel()
     if hasSearched then ShowPage() end
@@ -916,7 +1129,7 @@ end
 
 local function PrintHelp()
     Print(T("help_title"))
-    for i = 1, 7 do print("  " .. T("help_" .. i)) end
+    for i = 1, 8 do print("  " .. T("help_" .. i)) end
 end
 
 -- Приветствие один раз после установки
@@ -984,7 +1197,7 @@ loader:SetScript("OnEvent", function(_, event, arg1, arg2)
     elseif event == "GET_ITEM_INFO_RECEIVED" then
         for i = 1, ROWS_COUNT do
             local row = rows[i]
-            if row.id and row.id == arg1 then
+            if tab == "items" and row.id and row.id == arg1 then
                 row.failed = (arg2 == false)
                 FillRow(row)
             end
@@ -1016,8 +1229,17 @@ SlashCmdList["POLYGLOT"] = function(msg)
         Print(db.hideMinimap and T("minimap_off") or T("minimap_on"))
         return
     end
+    local placeArg = msg:match("^[Zz][Oo][Nn][Ee]%s*(.*)$") or msg:match("^[Pp][Ll][Aa][Cc][Ee]%s*(.*)$")
+    if placeArg then
+        frame:Show()
+        SetTab("places")
+        edit:SetText(placeArg)
+        DoSearch()
+        return
+    end
     if msg ~= "" then
         frame:Show()
+        if tab ~= "items" then SetTab("items") end
         edit:SetText(msg)
         DoSearch()
     else

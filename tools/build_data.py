@@ -9,6 +9,9 @@ build_data.py - собирает данные для аддона Polyglot.
 Запуск:    python tools/build_data.py
            python tools/build_data.py --check   (только определить новейшую сборку, ничего не писать)
            python tools/build_data.py --find 7708   (диагностика: есть ли предмет в таблицах wago.tools)
+           python tools/build_data.py --tables      (диагностика: колонки и примеры таблиц зон AreaTable и Map)
+           python tools/build_data.py --rows UiMap UiMapAssignment Map --where AreaID=1 --where ID=36
+                                                    (диагностика: все колонки таблиц и строки с указанными значениями)
 Результат:
   Build.lua                           метка сборки (читается основным аддоном)
   Modules/Polyglot_<локаль>/           по одному модулю на язык (загружаются по требованию)
@@ -207,6 +210,173 @@ def validate(merged):
 
 # ---------------------------------------------------------------- запись
 
+# ---------------------------------------------------------------- места (зоны и подземелья)
+
+# Ключ места в Lua: ID зоны из AreaTable как есть, карты (подземелья) из Map сдвинуты, чтобы не пересекаться.
+MAP_KEY_BASE = 1000000
+# Вид места: c континент, z зона, s подзона, d подземелье, r рейд, b поле боя, a арена.
+INSTANCE_KINDS = {"0": "c", "1": "d", "2": "r", "3": "b", "4": "a"}
+# Служебные записи клиента (тестовые, неиспользуемые), которые не нужны игрокам.
+JUNK_NAME = re.compile(
+    r"^(test\b|unused|zz|<|\[|\(|dev\b|debug|placeholder|temp\b|old\b)"      # служебное в начале названия
+    r"|\b(not used|unused|do not use|obsolete|deprecated|placeholder)\b"     # или где угодно («Not Used Deadmines»)
+    r"|\((test|old|obsolete|unused)\)",                                       # пометка в скобках
+    re.IGNORECASE)
+JUNK_MAP_DIR = ("test", "development", "transport")
+
+
+def _table_rows(text, name_col):
+    rows = list(csv.DictReader(io.StringIO(text)))
+    if not rows or "ID" not in rows[0] or name_col not in rows[0]:
+        raise ValueError(f"нет колонок ID / {name_col}")
+    return rows
+
+
+def parse_places(area_text, map_text):
+    """Возвращает ({ключ: вид}, {ключ: название}) по CSV таблиц AreaTable и Map одного языка."""
+    kinds, names = {}, {}
+    for row in _table_rows(area_text, "AreaName_lang"):
+        name = row["AreaName_lang"].strip()
+        if not row["ID"].isdigit() or not name or JUNK_NAME.search(name):
+            continue
+        parent = row.get("ParentAreaID", "0")
+        key = int(row["ID"])
+        kinds[key] = "s" if parent not in ("", "0") else "z"
+        names[key] = name
+    for row in _table_rows(map_text, "MapName_lang"):
+        name = row["MapName_lang"].strip()
+        directory = row.get("Directory", "").lower()
+        if (not row["ID"].isdigit() or not name or JUNK_NAME.search(name)
+                or any(bad in directory for bad in JUNK_MAP_DIR)):
+            continue
+        kind = INSTANCE_KINDS.get(row.get("InstanceType", ""))
+        if kind is None:
+            continue
+        key = MAP_KEY_BASE + int(row["ID"])
+        kinds[key] = kind
+        names[key] = name
+    return kinds, names
+
+
+def _num(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_place_maps(area_text, map_text, uimap_text, assign_text, kinds):
+    """Карта для каждого места: {ключ: [uiMapID] или [uiMapID, x, y]} (x, y: доли 0..1 от левого верхнего угла).
+    Зоны и подзоны открывают карту своей зоны (подзона: родительской), континенты свою карту,
+    подземелья карту зоны (или континента), где находится вход, плюс координаты входа.
+    Координаты входа это Corpse_0 (север-юг) и Corpse_1 (восток-запад) из таблицы Map."""
+    ui_type = {}
+    for r in csv.DictReader(io.StringIO(uimap_text)):
+        if r.get("ID", "").isdigit():
+            ui_type[int(r["ID"])] = r.get("Type", "")
+    zone_by_area, continent_by_map, zone_rects = {}, {}, []
+    for r in csv.DictReader(io.StringIO(assign_text)):
+        if not (r.get("UiMapID", "").isdigit() and r.get("MapID", "").lstrip("-").isdigit()):
+            continue
+        ui, map_id, area = int(r["UiMapID"]), int(r["MapID"]), int(_num(r.get("AreaID")))
+        xs = sorted((_num(r.get("Region_0")), _num(r.get("Region_3"))))
+        ys = sorted((_num(r.get("Region_1")), _num(r.get("Region_4"))))
+        rect = (xs[0], xs[1], ys[0], ys[1])
+        if rect[0] == rect[1] or rect[2] == rect[3]:
+            continue
+        if ui_type.get(ui) == "3" and area:
+            zone_by_area.setdefault(area, ui)
+            zone_rects.append((map_id, ui, rect))
+        elif ui_type.get(ui) == "2" and not area:
+            continent_by_map.setdefault(map_id, (ui, rect))
+
+    def place_on(rect, x, y):
+        """Доли карты для точки мира (x север, y запад). None, если точка вне прямоугольника."""
+        xmin, xmax, ymin, ymax = rect
+        if not (xmin <= x <= xmax and ymin <= y <= ymax):
+            return None
+        return round((ymax - y) / (ymax - ymin), 4), round((xmax - x) / (xmax - xmin), 4)
+
+    parent = {}
+    for r in csv.DictReader(io.StringIO(area_text)):
+        if r.get("ID", "").isdigit():
+            parent[int(r["ID"])] = int(_num(r.get("ParentAreaID")))
+    maps = {}
+    for key, kind in kinds.items():
+        if key < MAP_KEY_BASE:
+            area = key
+            for _ in range(10):            # подзона берёт карту родительской зоны
+                if area in zone_by_area or not parent.get(area):
+                    break
+                area = parent[area]
+            if area in zone_by_area:
+                maps[key] = [zone_by_area[area]]
+    for r in csv.DictReader(io.StringIO(map_text)):
+        if not r.get("ID", "").isdigit():
+            continue
+        key = MAP_KEY_BASE + int(r["ID"])
+        kind = kinds.get(key)
+        if kind == "c":
+            if int(r["ID"]) in continent_by_map:
+                maps[key] = [continent_by_map[int(r["ID"])][0]]
+        elif kind:
+            corpse_map = int(_num(r.get("CorpseMapID"), -1))
+            x, y = _num(r.get("Corpse_0")), _num(r.get("Corpse_1"))
+            if corpse_map < 0 or (x == 0 and y == 0):
+                continue                    # входа в данных нет
+            best = None
+            for map_id, ui, rect in zone_rects:
+                pos = place_on(rect, x, y) if map_id == corpse_map else None
+                size = (rect[1] - rect[0]) * (rect[3] - rect[2])
+                if pos and (best is None or size < best[0]):
+                    best = (size, ui, pos)
+            if best is None and corpse_map in continent_by_map:
+                ui, rect = continent_by_map[corpse_map]
+                pos = place_on(rect, x, y)
+                best = (0, ui, pos) if pos else None
+            if best:
+                maps[key] = [best[1], best[2][0], best[2][1]]
+    return maps
+
+
+def load_places(build, locales):
+    """Скачивает зоны и подземелья. Возвращает ({ключ: вид}, {локаль: {ключ: название}}).
+    Места необязательны: при любой проблеме с английским языком возвращается пустой результат."""
+    kinds, by_locale, en_texts = {}, {}, None
+    for loc in locales:
+        try:
+            area_text, map_text = download(build, loc, table="AreaTable"), download(build, loc, table="Map")
+            k, n = parse_places(area_text, map_text)
+        except (urllib.error.URLError, ValueError, TimeoutError) as e:
+            print(f"  места {loc}: нет данных ({e})")
+            continue
+        if loc == "enUS":
+            kinds = k
+            en_texts = (area_text, map_text)
+        by_locale[loc] = n
+    if not kinds:
+        print("ВНИМАНИЕ: английские названия мест не получены, поиск по местам работать не будет")
+        return {}, {}, {}
+    maps = {}
+    try:
+        maps = parse_place_maps(*en_texts, download(build, "enUS", table="UiMap"),
+                                download(build, "enUS", table="UiMapAssignment"), kinds)
+    except (urllib.error.URLError, ValueError, TimeoutError) as e:
+        print(f"ВНИМАНИЕ: данные карт не получены ({e}), клик по месту не откроет карту")
+    # Одинаковые места под разными ID (одно и то же название на всех языках) оставляем один раз
+    seen, drop = {}, set()
+    for key in sorted(kinds):
+        sig = (kinds[key],) + tuple(by_locale.get(loc, {}).get(key, "") for loc in locales)
+        if sig in seen:
+            drop.add(key)
+        else:
+            seen[sig] = key
+    kinds = {k: v for k, v in kinds.items() if k not in drop}
+    by_locale = {loc: {k: n for k, n in d.items() if k in kinds} for loc, d in by_locale.items()}
+    maps = {k: v for k, v in maps.items() if k in kinds}
+    return kinds, by_locale, maps
+
+
 def lua_str(s):
     s = s.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", " ")
     return '"' + s + '"'
@@ -224,7 +394,7 @@ def read_interface():
     return "16001"
 
 
-def write_module(loc, label, names, interface):
+def write_module(loc, label, names, interface, places=None, kinds=None, maps=None):
     folder = os.path.join(MODULES_DIR, f"Polyglot_{loc}")
     os.makedirs(folder, exist_ok=True)
 
@@ -244,7 +414,7 @@ def write_module(loc, label, names, interface):
     with open(os.path.join(folder, "Data.lua"), "w", encoding="utf-8", newline="\n") as f:
         f.write("PolyglotData = PolyglotData or {}\n")
         if not names:
-            f.write(f'PolyglotData["{loc}"] = {{ n = {{}}, l = {{}}, empty = true }}\n')
+            f.write(f'PolyglotData["{loc}"] = {{ n = {{}}, l = {{}}, p = {{}}, pl = {{}}, k = {{}}, mp = {{}}, empty = true }}\n')
             return 0
         ids = sorted(i for i, n in names.items() if n)
         f.write("local n, l = {}, {}\n")
@@ -255,7 +425,20 @@ def write_module(loc, label, names, interface):
                 name = names[item_id]
                 f.write(f"n[{item_id}]={lua_str(name)}\nl[{item_id}]={lua_str(name.lower())}\n")
             f.write("end)\n")
-        f.write(f'PolyglotData["{loc}"] = {{ n = n, l = l }}\n')
+        # места: p названия, pl в нижнем регистре, k виды (только в английском модуле)
+        f.write("local p, pl, k, mp = {}, {}, {}, {}\n")
+        keys = sorted(places or {})
+        for start in range(0, len(keys), CHUNK):
+            f.write("run(function()\n")
+            for key in keys[start:start + CHUNK]:
+                name = places[key]
+                f.write(f"p[{key}]={lua_str(name)}\npl[{key}]={lua_str(name.lower())}\n")
+                if kinds and key in kinds:
+                    f.write(f'k[{key}]="{kinds[key]}"\n')
+                if maps and key in maps:
+                    f.write(f"mp[{key}]={{{','.join(str(v) for v in maps[key])}}}\n")
+            f.write("end)\n")
+        f.write(f'PolyglotData["{loc}"] = {{ n = n, l = l, p = p, pl = pl, k = k, mp = mp }}\n')
         return len(ids)
 
 
@@ -310,6 +493,70 @@ def find_item(item_id):
             print(f"  {label} {build} | {table}: " + "; ".join(parts))
 
 
+def inspect_tables(tables=("AreaTable", "Map"), locales=("enUS", "ruRU"), samples=4):
+    """Диагностика для будущего поиска зон и подземелий: что реально лежит в таблицах wago.tools.
+    Ничего не записывает. Печатает колонки, число строк и несколько примеров на каждом языке."""
+    for build in forever_build_candidates():
+        reachable = False
+        for table in tables:
+            print(f"=== {table} | сборка Forever {build}")
+            rows = {}
+            for loc in locales:
+                try:
+                    text = download(build, loc, table=table)
+                except urllib.error.URLError as e:
+                    print(f"  {loc}: таблица недоступна ({e})")
+                    continue
+                reachable = True
+                reader = csv.DictReader(io.StringIO(text))
+                rows[loc] = list(reader)
+                print(f"  {loc}: строк {len(rows[loc])}")
+                if loc == locales[0]:
+                    print("  колонки:", ", ".join(reader.fieldnames or []))
+            if len(rows) == len(locales):
+                first, second = (rows[l] for l in locales[:2])
+                name_cols = [c for c in (first[0].keys() if first else []) if c.endswith("_lang")]
+                for col in name_cols:
+                    diff = sum(1 for a, b in zip(first, second) if a.get(col) and a.get(col) != b.get(col))
+                    print(f"  {col}: отличается между {locales[0]} и {locales[1]} в {diff} строках")
+                for a, b in list(zip(first, second))[:samples]:
+                    print("  пример:", {k: v for k, v in list(a.items())[:6]}, "->", {c: b.get(c) for c in name_cols})
+        if reachable:
+            return
+    sys.exit("Не удалось скачать таблицы ни для одной сборки")
+
+
+def inspect_rows(tables, where, samples=3):
+    """Диагностика: печатает все колонки таблиц (английский язык) и строки, где колонка равна значению.
+    where: список строк вида КОЛОНКА=ЗНАЧЕНИЕ. Таблицы без такой колонки пропускаются для этого условия."""
+    conditions = [w.split("=", 1) for w in where if "=" in w]
+    for build in forever_build_candidates():
+        reachable = False
+        for table in tables:
+            print(f"=== {table} | сборка Forever {build}")
+            try:
+                text = download(build, "enUS", table=table)
+            except urllib.error.URLError as e:
+                print(f"  таблица недоступна ({e})")
+                continue
+            reachable = True
+            reader = csv.DictReader(io.StringIO(text))
+            rows = list(reader)
+            print(f"  строк: {len(rows)}")
+            print("  колонки:", ", ".join(reader.fieldnames or []))
+            for row in rows[:samples]:
+                print("  пример:", dict(row))
+            for col, value in conditions:
+                found = [r for r in rows if r.get(col) == value][:5]
+                if found or col in (reader.fieldnames or []):
+                    print(f"  {col}={value}: найдено {len(found)}")
+                for row in found:
+                    print("   ", dict(row))
+        if reachable:
+            return
+    sys.exit("Не удалось скачать таблицы ни для одной сборки")
+
+
 def check_latest_build():
     """Определяет самую новую сборку Forever, для которой на wago.tools есть таблица предметов.
     Скачивает только один небольшой файл. Ничего не записывает. Печатает номер сборки."""
@@ -331,6 +578,23 @@ def main():
     if "--check" in sys.argv:
         check_latest_build()
         return
+    if "--rows" in sys.argv:
+        args = sys.argv[sys.argv.index("--rows") + 1:]
+        names, where, i = [], [], 0
+        while i < len(args):
+            if args[i] == "--where" and i + 1 < len(args):
+                where.append(args[i + 1])
+                i += 2
+            else:
+                names.append(args[i])
+                i += 1
+        if not names:
+            sys.exit("Использование: python tools/build_data.py --rows <Таблица>... [--where КОЛОНКА=ЗНАЧЕНИЕ]...")
+        inspect_rows(names, where)
+        return
+    if "--tables" in sys.argv:
+        inspect_tables()
+        return
     if "--find" in sys.argv:
         try:
             find_item(int(sys.argv[sys.argv.index("--find") + 1]))
@@ -347,8 +611,12 @@ def main():
     # Всё проверено, теперь можно писать файлы
     shutil.rmtree(MODULES_DIR, ignore_errors=True)
     interface = read_interface()
+    place_kinds, place_names, place_maps = load_places(forever_build, list(LOCALES))
+    print(f"Мест (зоны, подземелья): {len(place_kinds)}, с картой: {len(place_maps)}")
     for loc, label in LOCALES.items():
-        count = write_module(loc, label, names_by_locale[loc], interface)
+        count = write_module(loc, label, names_by_locale[loc], interface,
+                             places=place_names.get(loc), kinds=place_kinds if loc == "enUS" else None,
+                             maps=place_maps if loc == "enUS" else None)
         print(f"  {loc}: {count if count else 'пустой модуль'}")
 
     with open(os.path.join(ROOT, "Build.lua"), "w", encoding="utf-8", newline="\n") as f:

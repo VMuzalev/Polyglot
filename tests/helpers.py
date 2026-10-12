@@ -34,9 +34,32 @@ def fake_download(count=9000, overrides=None, fail=()):
     prefix = {"enUS": "Item", "ruRU": "Предмет", "deDE": "Gegenstand"}
     overrides = overrides or {}
 
-    def download(build, locale, attempts=3):
+    area_word = {"enUS": "Zone", "ruRU": "Зона", "deDE": "Gebiet"}
+
+    def download(build, locale, attempts=3, table="ItemSparse"):
         if locale in fail:
             raise urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        if table == "AreaTable":
+            word = area_word.get(locale, locale)
+            rows = ["ID,ZoneName,AreaName_lang,ContinentID,ParentAreaID"]
+            rows += [f"{i},Z{i},{word} {i},0,{0 if i <= 3 else 1}" for i in range(1, 7)]
+            rows += [f"7,Z7,{word} 6,0,1", "8,Z8,Test Area,0,0", "9,Z9,,0,0", "10,Z10,Not Used Deadmines,0,1", "11,Z11,Old (Unused) Hall,0,1"]   # дубль названия, служебная и пустая записи
+            return "\n".join(rows) + "\n"
+        if table == "Map":
+            word = {"enUS": "Dungeon", "ruRU": "Подземелье", "deDE": "Verlies"}.get(locale, locale)
+            return ("ID,Directory,MapName_lang,InstanceType,Corpse_0,Corpse_1,CorpseMapID\n"
+                    f"0,Azeroth,{word} World,0,0,0,-1\n33,Shadowfang,{word} 33,1,-5000,-900,0\n"
+                    f"409,MoltenCore,{word} 409,2,0,0,-1\n"
+                    f"13,test,{word} Test,1,0,0,-1\n30,AlteracValley,{word} 30,3,0,0,-1\n")
+        if table == "UiMap":
+            return "Name_lang,ID,ParentUiMapID,Type\nEastern,1415,0,2\nZoneOne,1426,1415,3\nBigZone,1500,1415,3\nAzeroth,947,0,1\n"
+        if table == "UiMapAssignment":
+            # зона 1 (как Дун Морог) и континент Восточных королевств
+            return ("UiMin_0,UiMin_1,UiMax_0,UiMax_1,Region_0,Region_1,Region_2,Region_3,Region_4,Region_5,ID,UiMapID,OrderIndex,MapID,AreaID\n"
+                    "0,0,1,1,-12000,-5000,-1000000,-3000,5000,1000000,4,1500,0,0,3\n"   # большая зона, тоже содержит вход
+                    "0,0,1,1,-7160.4165,-3122.9165,-1000000,-3877.0833,1802.0833,1000000,1,1426,0,0,1\n"
+                    "0,0,1,1,-20000,-20000,-1000000,20000,20000,1000000,2,1415,0,0,0\n"
+                    "0,0,1,1,-20000,-20000,-1000000,20000,20000,1000000,3,947,0,0,0\n")
         word = prefix.get(locale, locale)
         names = {i: f"{word} {i}" for i in range(1, count + 1)}
         names.update(overrides.get(locale, {}))
@@ -113,8 +136,19 @@ IsShiftKeyDown = function() return SHIFT end
 SHIFT = false
 LOADED = {}
 OLD_ADDONS = {}
-C_AddOns = { DoesAddOnExist = function(name) return OLD_ADDONS[name] == true end,
+MAP_SET = nil
+MAP_SCRIPTS = {}
+MAP_SHOWN = false
+WorldMapFrame = { SetMapID = function(_, id) MAP_SET = id end, IsShown = function() return MAP_SHOWN end,
+  Show = function() MAP_SHOWN = true end, GetMapID = function() return MAP_SET end,
+  HookScript = function(_, name, fn) MAP_SCRIPTS[name] = fn end,
+  GetCanvas = function() local c = stub(); c.GetWidth = function() return 1000 end; c.GetHeight = function() return 500 end; return c end }
+ShowUIPanel = function(f) f:Show() end
+DISABLED = {}
+C_AddOns = { EnableAddOn = function(name) DISABLED[name] = nil end,
+  DoesAddOnExist = function(name) return OLD_ADDONS[name] == true end,
   LoadAddOn = function(name)
+    if DISABLED[name] then return nil, "DISABLED" end
     local src = read_module(name)
     if not src then return nil, "MISSING" end
     LOADED[#LOADED + 1] = name
@@ -151,6 +185,7 @@ EXPOSE = [
     ("local favBtn", "favBtn"), ("local viewFav", "viewFav"), ("local uiBtn", "uiBtn"), ("local langBtn = CreateFrame", "langBtn = CreateFrame"),
     ("local title = frame:CreateFontString", "title = frame:CreateFontString"),
     ("local minimapLabel = panel", "minimapLabel = panel"),
+    ("local mapPin\n", "mapPin = nil\n"), ("local tab = \"items\"", "tab = \"items\""), ("local tabItemsBtn", "tabItemsBtn"), ("local tabPlacesBtn", "tabPlacesBtn"),
 ]
 
 

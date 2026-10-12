@@ -345,6 +345,182 @@ class HelpAndWelcome(AddonTestCase):
         self.assertEqual(len(g.printed()), before)
 
 
+class Places(AddonTestCase):
+    """Вкладка «Места»: зоны и подземелья."""
+
+    def shown(self, g):
+        return g.ev("(function() local n = 0 for i = 1, #rows do if rows[i]._shown then n = n + 1 end end return n end)()")
+
+    def test_tab_switch_searches_places_not_items(self):
+        g = self.game(locale="ruRU", saved="{ langs = {ruRU = true}, seenWelcome = true }")
+        g.slash("")
+        g.lua.execute('edit._text = "зона 2"')
+        g.lua.execute("tabPlacesBtn._scripts.OnClick()")
+        self.assertEqual(g.ev("tab"), "places")
+        self.assertEqual(self.shown(g), 1)
+        text = g.ev("rows[1].text._text")
+        self.assertIn("Zone 2", text)
+        self.assertIn("Зона 2", text)
+        self.assertIn("зона", text)            # вид места на языке интерфейса
+
+    def test_place_title_uses_interface_language(self):
+        g = self.game(locale="ruRU", saved="{ langs = {ruRU = true}, seenWelcome = true }")
+        g.slash("zone зона 2")
+        first = g.ev("rows[1].text._text").split("\n")[0]
+        self.assertIn("Зона 2", first)
+        g.lua.execute("uiBtn._scripts.OnClick()")     # интерфейс на английский
+        first = g.ev("rows[1].text._text").split("\n")[0]
+        self.assertIn("Zone 2", first)
+
+    def test_place_search_by_other_language_and_loose_mode(self):
+        g = self.game(locale="ruRU", saved="{ langs = {ruRU = true}, seenWelcome = true }")
+        g.slash("zone подземелье 33")
+        self.assertEqual(g.ev("tab"), "places")
+        self.assertIn("Dungeon 33", g.ev("rows[1].text._text"))
+        self.assertIn("подземелье", g.ev("rows[1].text._text"))
+
+    def test_items_still_found_after_switching_back(self):
+        g = self.game(locale="ruRU", saved="{ langs = {ruRU = true}, seenWelcome = true }")
+        g.slash("zone зона")
+        g.slash("Предмет 5")
+        self.assertEqual(g.ev("tab"), "items")
+        self.assertIn("5", g.ev("rows[1].text._text"))
+
+    def test_place_ids_do_not_leak_into_item_search(self):
+        g = self.game(locale="enUS")
+        count, _ = g.search("zone 2")
+        self.assertEqual(count, 0)
+
+    def test_old_data_without_places_shows_message(self):
+        g = self.game(locale="enUS")
+        g.slash("Item 5")   # загружает модули
+        g.lua.execute("PolyglotData.enUS.p = nil")
+        g.slash("zone anything")
+        self.assertIn("No place data", g.ev("status._text"))
+
+    def test_favorites_button_hidden_on_places(self):
+        g = self.game(locale="enUS")
+        g.slash("zone zone")
+        self.assertFalse(g.ev("favBtn._shown"))
+        g.slash("Item 5")
+        self.assertTrue(g.ev("favBtn._shown"))
+
+
+class PlaceMap(AddonTestCase):
+    """Клик по месту открывает карту; для подземелья ставится метка входа."""
+
+    def click_first(self, g, query):
+        g.slash("zone " + query)
+        g.lua.execute("rows[1]._scripts.OnClick(rows[1])")
+
+    def test_zone_click_opens_zone_map_without_pin(self):
+        g = self.game(locale="enUS")
+        self.click_first(g, "zone 1")
+        self.assertEqual(g.ev("MAP_SET"), 1426)
+        self.assertTrue(g.ev("MAP_SHOWN"))
+        self.assertIsNone(g.ev("mapPin"))
+
+    def test_subzone_opens_parent_zone_map(self):
+        g = self.game(locale="enUS")
+        self.click_first(g, "zone 5")
+        self.assertEqual(g.ev("MAP_SET"), 1426)
+
+    def test_dungeon_click_opens_map_and_shows_entrance_pin(self):
+        g = self.game(locale="enUS")
+        self.click_first(g, "dungeon 33")
+        self.assertEqual(g.ev("MAP_SET"), 1426)
+        self.assertTrue(g.ev("mapPin._shown"))
+        self.assertAlmostEqual(g.ev("mapPin.want.x"), 0.5486, places=3)
+        self.assertAlmostEqual(g.ev("mapPin.want.y"), 0.3420, places=3)
+
+    def test_search_window_hides_when_map_opens(self):
+        g = self.game(locale="enUS")
+        self.click_first(g, "zone 1")
+        self.assertFalse(g.ev("frame._shown"))
+
+    def test_pin_is_big_and_removed_by_click(self):
+        g = self.game(locale="enUS")
+        self.click_first(g, "dungeon 33")
+        self.assertTrue(g.ev("mapPin._shown"))
+        g.lua.execute("mapPin._scripts.OnMouseUp(mapPin)")
+        self.assertFalse(g.ev("mapPin._shown"))
+        self.assertTrue(g.ev("rawget(mapPin, 'want') == nil"))
+        g.lua.execute("HOOKS.OnMapChanged()")        # после снятия метка не возвращается
+        self.assertFalse(g.ev("mapPin._shown"))
+
+    def test_pin_removed_when_map_closes(self):
+        g = self.game(locale="enUS")
+        self.click_first(g, "dungeon 33")
+        g.lua.execute("MAP_SCRIPTS.OnHide()")
+        self.assertFalse(g.ev("mapPin._shown"))
+        self.assertTrue(g.ev("rawget(mapPin, 'want') == nil"))
+
+    def test_pin_hides_when_another_map_is_opened(self):
+        g = self.game(locale="enUS")
+        self.click_first(g, "dungeon 33")
+        g.lua.execute("MAP_SET = 1415; HOOKS.OnMapChanged()")
+        self.assertFalse(g.ev("mapPin._shown"))
+
+    def test_pin_removed_when_opening_place_without_entrance(self):
+        g = self.game(locale="enUS")
+        self.click_first(g, "dungeon 33")
+        self.click_first(g, "zone 1")
+        self.assertFalse(g.ev("mapPin._shown"))
+
+    def test_place_without_map_says_so(self):
+        g = self.game(locale="enUS")
+        self.click_first(g, "zone 2")
+        self.assertIsNone(g.ev("MAP_SET"))
+        self.assertTrue(any("No map data" in line for line in g.printed()))
+
+    def test_item_click_does_not_open_map(self):
+        g = self.game(locale="enUS")
+        g.slash("Item 5")
+        g.lua.execute("rows[1]._scripts.OnClick(rows[1])")
+        self.assertIsNone(g.ev("MAP_SET"))
+
+    def test_no_map_frame_does_not_crash(self):
+        g = self.game(locale="enUS")
+        g.lua.execute("WorldMapFrame = nil")
+        self.click_first(g, "zone 1")
+        self.assertTrue(any("No map data" in line for line in g.printed()))
+
+
+class DisabledModule(AddonTestCase):
+    def test_disabled_language_module_is_enabled_and_loaded(self):
+        g = self.game(locale="enUS", saved="{ langs = {deDE = true}, seenWelcome = true }")
+        g.lua.execute('DISABLED["Polyglot_deDE"] = true')
+        g.slash("Item 5")
+        self.assertIn("Polyglot_deDE", g.loaded())
+        self.assertIsNone(g.ev("DISABLED['Polyglot_deDE']"))
+
+
+class RowLines(AddonTestCase):
+    """Каждая строка текста результата выводится отдельным FontString (многострочный текст клиент обрезает)."""
+
+    def test_place_rows_have_one_line_per_language(self):
+        g = self.game(locale="ruRU", saved="{ langs = {ruRU = true}, seenWelcome = true }")
+        g.slash("zone зона 2")
+        self.assertIn("Зона 2", g.ev("rows[1].lines[1]._text"))        # заголовок на языке интерфейса
+        self.assertIn("Zone 2", g.ev("rows[1].lines[2]._text"))
+        self.assertIn("Зона 2", g.ev("rows[1].lines[3]._text"))
+        self.assertEqual(g.ev("rows[1].lines[4]._text"), "")
+
+    def test_item_rows_have_one_line_per_language(self):
+        g = self.game(locale="ruRU", saved="{ langs = {ruRU = true}, seenWelcome = true }")
+        g.slash("Предмет 5")
+        lines = [g.ev(f"rows[1].lines[{i}]._text") for i in range(1, 6)]
+        self.assertTrue(any("enUS:|r Item 5" in l for l in lines), lines)
+        self.assertTrue(any("ruRU:|r Предмет 5" in l for l in lines), lines)
+
+    def test_disabled_module_hint(self):
+        g = self.game(locale="ruRU", saved="{ langs = {itIT = true}, seenWelcome = true }")
+        g.lua.execute('DISABLED["Polyglot_itIT"] = true; C_AddOns.EnableAddOn = nil; EnableAddOn = nil')
+        g.slash("Предмет 5")
+        g.lua.execute("panel._scripts.OnShow(panel)")
+        self.assertIn("выключен в списке аддонов", g.ev("statuses.itIT._text"))
+
+
 class Rename(AddonTestCase):
     """Переименование ItemLoc -> Polyglot: настройки, предупреждение, команды."""
 
@@ -400,7 +576,7 @@ class UiLanguageButton(AddonTestCase):
         g.lua.execute("uiBtn._scripts.OnClick()")
         self.assertEqual(g.ev("uiBtn._text"), "EN")
         self.assertIn("Favorites", g.ev("favBtn._text"))
-        self.assertEqual(g.ev("title._text"), "Polyglot: item search")
+        self.assertEqual(g.ev("tabPlacesBtn._text"), "Places")
         g.lua.execute("uiBtn._scripts.OnClick()")
         self.assertEqual(g.ev("uiBtn._text"), "RU")
 

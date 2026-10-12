@@ -1,3 +1,5 @@
+import contextlib
+import io
 import os
 import unittest
 import urllib.error
@@ -95,6 +97,33 @@ class Validate(unittest.TestCase):
 
 
 class FullBuild(unittest.TestCase):
+    def test_inspect_rows_prints_all_columns_and_matches(self):
+        def table_download(build, locale, attempts=3, table="ItemSparse"):
+            return "ID,AreaID,Corpse_0\n1,5,10.5\n2,36,20.5\n3,36,30.5\n"
+        with build_workspace(table_download):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                b.inspect_rows(["Map"], ["AreaID=36", "Nope=1"])
+        text = out.getvalue()
+        self.assertIn("колонки: ID, AreaID, Corpse_0", text)
+        self.assertIn("AreaID=36: найдено 2", text)
+        self.assertIn("'Corpse_0': '30.5'", text)
+        self.assertNotIn("Nope=1", text)       # колонки нет: условие пропущено
+
+    def test_inspect_tables_prints_columns_and_samples(self):
+        def table_download(build, locale, attempts=3, table="ItemSparse"):
+            word = {"enUS": "Forest", "ruRU": "Лес"}[locale]
+            return "ID,ContinentID,AreaName_lang\n1,0,%s 1\n2,0,%s 2\n" % (word, word)
+        with build_workspace(table_download):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                b.inspect_tables()
+        text = out.getvalue()
+        self.assertIn("=== AreaTable", text)
+        self.assertIn("=== Map", text)
+        self.assertIn("колонки: ID, ContinentID, AreaName_lang", text)
+        self.assertIn("AreaName_lang: отличается между enUS и ruRU в 2 строках", text)
+
     def test_generates_all_modules_and_build_marker(self):
         with build_workspace(fake_download(), interface="16002") as root:
             run_build()
@@ -130,6 +159,81 @@ class FullBuild(unittest.TestCase):
             lua.execute(read(root, "Modules", "Polyglot_enUS", "Data.lua"))
             self.assertEqual(lua.eval("PolyglotData.enUS.n[5]"), 'Quote " and \\ backslash')
             self.assertEqual(lua.eval("PolyglotData.enUS.l[6]"), "ärmel и ёлка")
+
+    def _places(self, root, loc="ruRU"):
+        lua = lua51.LuaRuntime()
+        for l in ("enUS", loc):
+            lua.execute(read(root, "Modules", f"Polyglot_{l}", "Data.lua"))
+        return lua
+
+    def test_places_zones_and_dungeons_written(self):
+        with build_workspace(fake_download()) as root:
+            run_build()
+            lua = self._places(root)
+            self.assertEqual(lua.eval("PolyglotData.ruRU.p[2]"), "Зона 2")
+            self.assertEqual(lua.eval("PolyglotData.ruRU.pl[2]"), "зона 2")
+            self.assertEqual(lua.eval("PolyglotData.enUS.k[2]"), "z")        # зона верхнего уровня
+            self.assertEqual(lua.eval("PolyglotData.enUS.k[5]"), "s")        # подзона (есть родитель)
+            self.assertEqual(lua.eval("PolyglotData.enUS.k[1000033]"), "d")  # подземелье из Map
+            self.assertEqual(lua.eval("PolyglotData.enUS.k[1000409]"), "r")  # рейд
+            self.assertEqual(lua.eval("PolyglotData.enUS.k[1000030]"), "b")  # поле боя
+            self.assertEqual(lua.eval("PolyglotData.enUS.k[1000000]"), "c")  # континент
+            self.assertEqual(lua.eval("PolyglotData.ruRU.p[1000033]"), "Подземелье 33")
+
+    def test_place_maps_for_zones_subzones_continents_and_entrances(self):
+        with build_workspace(fake_download()) as root:
+            run_build()
+            lua = self._places(root)
+            self.assertEqual(lua.eval("PolyglotData.enUS.mp[2] == nil"), True)       # зона 2 без карты в данных
+            self.assertEqual(lua.eval("PolyglotData.enUS.mp[1][1]"), 1426)           # зона 1
+            self.assertEqual(lua.eval("#PolyglotData.enUS.mp[1]"), 1)                # без метки
+            self.assertEqual(lua.eval("PolyglotData.enUS.mp[5][1]"), 1426)           # подзона берёт карту родителя
+            self.assertEqual(lua.eval("PolyglotData.enUS.mp[1000000][1]"), 1415)     # континент
+            # вход в подземелье: карта самой маленькой зоны, где он лежит, и доли карты
+            self.assertEqual(lua.eval("PolyglotData.enUS.mp[1000033][1]"), 1426)
+            self.assertAlmostEqual(lua.eval("PolyglotData.enUS.mp[1000033][2]"), 0.5486, places=3)
+            self.assertAlmostEqual(lua.eval("PolyglotData.enUS.mp[1000033][3]"), 0.3420, places=3)
+            self.assertIsNone(lua.eval("PolyglotData.enUS.mp[1000409]"))             # у рейда координат входа нет
+
+    def test_missing_map_tables_do_not_break_places(self):
+        base = fake_download()
+
+        def no_uimap(build, locale, attempts=3, table="ItemSparse"):
+            if table in ("UiMap", "UiMapAssignment"):
+                raise urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+            return base(build, locale, table=table)
+        with build_workspace(no_uimap) as root:
+            out = run_build()
+            self.assertIn("данные карт не получены", out)
+            lua = self._places(root)
+            self.assertEqual(lua.eval("PolyglotData.ruRU.p[2]"), "Зона 2")
+            self.assertIsNone(lua.eval("next(PolyglotData.enUS.mp)"))
+
+    def test_places_junk_and_duplicates_are_dropped(self):
+        with build_workspace(fake_download()) as root:
+            run_build()
+            lua = self._places(root)
+            self.assertIsNone(lua.eval("PolyglotData.enUS.p[8]"))           # служебная «Test Area»
+            self.assertIsNone(lua.eval("PolyglotData.enUS.p[9]"))           # пустое название
+            self.assertIsNone(lua.eval("PolyglotData.enUS.p[10]"))          # «Not Used ...» в середине названия
+            self.assertIsNone(lua.eval("PolyglotData.enUS.p[11]"))          # пометка (Unused)
+            self.assertIsNone(lua.eval("PolyglotData.enUS.p[7]"))           # дубль названия «Zone 6»
+            self.assertIsNotNone(lua.eval("PolyglotData.enUS.p[6]"))
+            self.assertIsNone(lua.eval("PolyglotData.enUS.p[1000013]"))     # карта из каталога test
+
+    def test_places_failure_does_not_break_items(self):
+        base = fake_download()
+
+        def no_places(build, locale, attempts=3, table="ItemSparse"):
+            if table != "ItemSparse":
+                raise urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+            return base(build, locale)
+        with build_workspace(no_places) as root:
+            out = run_build()
+            self.assertIn("поиск по местам работать не будет", out)
+            lua = self._places(root)
+            self.assertEqual(lua.eval("PolyglotData.ruRU.n[5]"), "Предмет 5")
+            self.assertEqual(lua.eval("next(PolyglotData.enUS.p)"), None)
 
     def test_optional_language_missing_gives_empty_module(self):
         with build_workspace(fake_download(fail=("koKR",))) as root:
