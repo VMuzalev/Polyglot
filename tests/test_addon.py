@@ -406,6 +406,157 @@ class Places(AddonTestCase):
         self.assertTrue(g.ev("favBtn._shown"))
 
 
+class ItemTooltip(AddonTestCase):
+    """Названия предмета на других языках в обычной подсказке."""
+
+    LANGS = "{ langs = {ruRU = true, deDE = true}, seenWelcome = true%s }"
+
+    def tooltip(self, g, item_id=5, owner=None):
+        g.lua.execute("tt = NewTT(%s)" % ("nil" if owner is None else owner))
+        g.lua.execute(f"TT_CB(tt, {{ id = {item_id} }})")
+        return [g.lua.eval(f"tt.lines[{i}]") for i in range(1, int(g.lua.eval("#tt.lines")) + 1)]
+
+    def test_default_mode_alt_shows_lines_only_with_alt(self):
+        g = self.game(locale="ruRU", saved=self.LANGS % "")
+        self.assertEqual(self.tooltip(g), [])                      # Alt не зажат
+        g.lua.execute("ALT = true")
+        lines = self.tooltip(g)
+        self.assertEqual(len(lines), 2)                            # en и de, язык клиента (ru) пропущен
+        self.assertIn("enUS", lines[0]); self.assertIn("Item 5", lines[0])
+        self.assertIn("deDE", lines[1]); self.assertIn("Gegenstand 5", lines[1])
+
+    def test_lines_mode_one_line_per_language(self):
+        g = self.game(locale="ruRU", saved=self.LANGS % ", tooltip = 'lines'")
+        lines = self.tooltip(g)
+        self.assertEqual(len(lines), 2)
+        self.assertFalse(any("ruRU" in l for l in lines))          # язык клиента не дублируется
+
+    def test_one_mode_gives_single_line_english_first(self):
+        g = self.game(locale="ruRU", saved=self.LANGS % ", tooltip = 'one'")
+        lines = self.tooltip(g)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("enUS", lines[0])
+
+    def test_off_mode_adds_nothing_even_with_alt(self):
+        g = self.game(locale="ruRU", saved=self.LANGS % ", tooltip = 'off'")
+        g.lua.execute("ALT = true")
+        self.assertEqual(self.tooltip(g), [])
+
+    def test_english_client_skips_english_line(self):
+        g = self.game(locale="enUS", saved=self.LANGS % ", tooltip = 'lines'")
+        lines = self.tooltip(g)
+        self.assertFalse(any("enUS" in l for l in lines))
+        self.assertTrue(any("deDE" in l for l in lines))
+
+    def test_line_equal_to_displayed_title_is_skipped(self):
+        g = self.game(locale="ruRU", saved=self.LANGS % ", tooltip = 'lines'")
+        g.lua.execute("TT_TITLE = 'Item 5'")
+        lines = self.tooltip(g)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("deDE", lines[0])
+
+    def test_item_unknown_to_database_adds_nothing(self):
+        g = self.game(locale="ruRU", saved=self.LANGS % ", tooltip = 'lines'")
+        self.assertEqual(self.tooltip(g, item_id=999999), [])
+
+    def test_tooltip_of_own_result_row_is_not_duplicated(self):
+        g = self.game(locale="ruRU", saved=self.LANGS % ", tooltip = 'lines'")
+        g.slash("Предмет 5")
+        self.assertEqual(self.tooltip(g, owner="rows[1]"), [])
+
+    def test_tooltip_size_is_recalculated(self):
+        g = self.game(locale="ruRU", saved=self.LANGS % ", tooltip = 'lines'")
+        self.tooltip(g)
+        self.assertEqual(g.ev("tt.shows"), 1)
+
+    def test_alt_press_redraws_open_tooltip(self):
+        g = self.game(locale="ruRU", saved=self.LANGS % "")
+        g.lua.execute("REDRAWN = 0; local owner = {GetScript = function() return function() REDRAWN = REDRAWN + 1 end end}\n"
+                      "GameTooltip.GetOwner = function() return owner end; GameTooltip._shown = true")
+        g.fire("MODIFIER_STATE_CHANGED", '"LALT"')
+        self.assertEqual(g.ev("REDRAWN"), 1)
+        g.fire("MODIFIER_STATE_CHANGED", '"LSHIFT"')              # другие клавиши не в счёт
+        self.assertEqual(g.ev("REDRAWN"), 1)
+
+    def test_alt_press_ignored_in_other_modes(self):
+        g = self.game(locale="ruRU", saved=self.LANGS % ", tooltip = 'lines'")
+        g.lua.execute("REDRAWN = 0; local owner = {GetScript = function() return function() REDRAWN = REDRAWN + 1 end end}\n"
+                      "GameTooltip.GetOwner = function() return owner end; GameTooltip._shown = true")
+        g.fire("MODIFIER_STATE_CHANGED", '"LALT"')
+        self.assertEqual(g.ev("REDRAWN"), 0)
+
+    def test_legacy_hook_path_works_without_tooltip_data_processor(self):
+        g = self.game(locale="ruRU", saved=self.LANGS % ", tooltip = 'lines'", legacy_tooltip=True)
+        g.lua.execute("LEGACY_LINK = '|cffffffff|Hitem:5::::|h[x]|h|r'; LEGACY_HOOK(GameTooltip)")
+        self.assertEqual(g.ev("#LEGACY_LINES"), 2)
+
+
+class TooltipSettings(AddonTestCase):
+    def test_four_radio_buttons_switch_mode(self):
+        g = self.game(locale="enUS")
+        modes = g.lua.eval("(function() local k = {} for m in pairs(ttChecks) do k[#k + 1] = m end table.sort(k) return table.concat(k, ',') end)()")
+        self.assertEqual(modes.split(","), ["alt", "lines", "off", "one"])
+        g.lua.execute("panel._scripts.OnShow(panel)")
+        self.assertTrue(g.ev("ttChecks.alt._checked"))              # по умолчанию Alt
+        g.lua.execute("ttChecks.lines._scripts.OnClick(ttChecks.lines)")
+        self.assertEqual(g.ev("PolyglotDB.tooltip"), "lines")
+        self.assertTrue(g.ev("ttChecks.lines._checked"))
+        self.assertFalse(g.ev("ttChecks.alt._checked"))
+        g.lua.execute("ttChecks.off._scripts.OnClick(ttChecks.off)")
+        self.assertEqual(g.ev("PolyglotDB.tooltip"), "off")
+        self.assertFalse(g.ev("ttChecks.lines._checked"))
+
+    def test_unknown_saved_value_falls_back_to_alt(self):
+        g = self.game(locale="enUS", saved="{ tooltip = 'nonsense', seenWelcome = true }")
+        g.lua.execute("panel._scripts.OnShow(panel)")
+        self.assertTrue(g.ev("ttChecks.alt._checked"))
+
+
+class UiLanguageSetting(AddonTestCase):
+    """Единый выбор языка интерфейса: в настройках и в окне поиска."""
+
+    def click(self, g, key):
+        g.lua.execute(f'uiChecks["{key}"]._scripts.OnClick(uiChecks["{key}"])')
+
+    def test_settings_radio_switches_whole_addon_to_english(self):
+        g = self.game(locale="ruRU")
+        self.click(g, "enUS")
+        self.assertEqual(g.ev("PolyglotDB.uiLang"), "enUS")
+        self.assertEqual(g.ev("tabPlacesBtn._text"), "Places")                      # окно поиска
+        self.assertEqual(g.ev("minimapLabel._text"), "Show the minimap button")      # настройки
+        self.assertEqual(g.ev("uiBtn._text"), "EN")                                  # кнопка в окне
+        self.assertEqual(g.ev("uiHeader._text"), "Addon interface language (window and settings)")
+        self.assertEqual(g.ev("ttHeader._text"), "Item tooltips: names in your other languages")
+        self.assertEqual(g.ev("ttLabels.off._text"), "Off")
+        self.assertEqual(g.ev("uiLabels.auto._text"), "Auto (as in game)")
+        self.assertTrue(g.ev("uiChecks.enUS._checked"))
+        self.assertFalse(g.ev("uiChecks.auto._checked"))
+
+    def test_back_to_auto_follows_client_language(self):
+        g = self.game(locale="ruRU", saved="{ uiLang = 'enUS', seenWelcome = true }")
+        self.click(g, "auto")
+        self.assertTrue(g.ev("rawget(PolyglotDB, 'uiLang') == nil"))
+        self.assertEqual(g.ev("tabPlacesBtn._text"), "Места")
+        self.assertEqual(g.ev("uiBtn._text"), "RU")
+        self.assertTrue(g.ev("uiChecks.auto._checked"))
+        self.assertIn("Авто", g.ev("uiLabels.auto._text"))
+
+    def test_window_button_updates_settings_radio(self):
+        g = self.game(locale="ruRU")
+        g.lua.execute("panel._scripts.OnShow(panel)")
+        self.assertTrue(g.ev("uiChecks.auto._checked"))
+        g.lua.execute("uiBtn._scripts.OnClick()")
+        self.assertTrue(g.ev("uiChecks.enUS._checked"))
+        self.assertFalse(g.ev("uiChecks.auto._checked"))
+        self.assertEqual(g.ev("minimapLabel._text"), "Show the minimap button")
+
+    def test_opening_settings_reapplies_all_texts(self):
+        g = self.game(locale="ruRU", saved="{ uiLang = 'enUS', seenWelcome = true }")
+        g.lua.execute("minimapLabel._text = 'stale text'")
+        g.lua.execute("panel._scripts.OnShow(panel)")
+        self.assertEqual(g.ev("minimapLabel._text"), "Show the minimap button")
+
+
 class PlaceMap(AddonTestCase):
     """Клик по месту открывает карту; для подземелья ставится метка входа."""
 

@@ -63,6 +63,10 @@ local STRINGS = {
         st_missing = "not found: folder Polyglot_%s",
         st_disabled = "disabled in the addon list: tick Polyglot_%s there and /reload",
         opt_minimap = "Show the minimap button",
+        opt_tooltip = "Item tooltips: names in your other languages",
+        opt_uilang = "Addon interface language (window and settings)", ui_auto = "Auto (as in game)",
+        tt_off = "Off", tt_one = "One line: one extra language",
+        tt_lines = "A line for each language", tt_alt = "A line for each language, only while Alt is held",
         mm_tip_title = "Polyglot", mm_left = "Left-click: open / close", mm_right = "Right-click: language settings",
         mm_drag = "Drag: move the button",
         binding = "Open / close the Polyglot window",
@@ -123,6 +127,10 @@ local STRINGS = {
         st_missing = "не найден: папка Polyglot_%s",
         st_disabled = "выключен в списке аддонов: включите Polyglot_%s там и сделайте /reload",
         opt_minimap = "Показывать кнопку у миникарты",
+        opt_tooltip = "Подсказки предметов: названия на других языках",
+        opt_uilang = "Язык интерфейса аддона (окно и настройки)", ui_auto = "Авто (как в игре)",
+        tt_off = "Выключено", tt_one = "Одна строка: один дополнительный язык",
+        tt_lines = "По строке на каждый язык", tt_alt = "По строке на каждый язык, только пока зажат Alt",
         mm_tip_title = "Polyglot", mm_left = "Левый клик: открыть / закрыть", mm_right = "Правый клик: языки поиска",
         mm_drag = "Перетаскивание: переместить кнопку",
         binding = "Открыть / закрыть окно Polyglot",
@@ -407,6 +415,7 @@ local rows = {}
 for i = 1, ROWS_COUNT do
     local row = CreateFrame("Button", nil, frame)
     row:SetSize(FRAME_W - 48, 56)
+    row.polyglotRow = true
     row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
     row.icon = row:CreateTexture(nil, "ARTWORK")
     row.icon:SetSize(40, 40)
@@ -889,6 +898,87 @@ end
 local OpenOptions = function() Print(T("no_options")) end
 local ApplyMinimapVisibility   -- объявлена ниже
 
+---------------------------------------------------------------------------
+-- Подсказки предметов: названия на других языках
+-- Режимы: off выключено, one одна строка (один язык), lines по строке на язык, alt как lines, но только с зажатым Alt
+---------------------------------------------------------------------------
+local TOOLTIP_MODES = { "off", "one", "lines", "alt" }
+
+local function TooltipMode()
+    local m = db.tooltip
+    for _, known in ipairs(TOOLTIP_MODES) do
+        if m == known then return m end
+    end
+    return "alt"   -- по умолчанию: ничего не загромождает, пока не зажат Alt
+end
+
+local function ClientLocale()
+    local l = GetLocale()
+    return l == "enGB" and "enUS" or l
+end
+
+-- Названия предмета на включённых языках, кроме языка клиента (его игра и так показывает)
+local function TooltipNames(id)
+    EnsureActive()
+    local client = ClientLocale()
+    local out = {}
+    for _, loc in ipairs(ActiveLocales()) do
+        local d = PolyglotData[loc]
+        local nm = d and d.n and d.n[id]
+        if loc ~= client and nm and nm ~= "" then out[#out + 1] = { loc, nm } end
+    end
+    return out
+end
+
+local function AddTooltipNames(tooltip, id)
+    local mode = TooltipMode()
+    if mode == "off" or not id then return end
+    if mode == "alt" and not (IsAltKeyDown and IsAltKeyDown()) then return end
+    local owner = tooltip.GetOwner and tooltip:GetOwner()
+    if owner and owner.polyglotRow then return end   -- подсказка из окна Polyglot: названия там и так видны
+    local shown = ""   -- название, уже выведенное игрой первой строкой
+    local tname = tooltip.GetName and tooltip:GetName()
+    local left = tname and _G[tname .. "TextLeft1"]
+    if left and left.GetText then shown = left:GetText() or "" end
+    local added = 0
+    for _, pair in ipairs(TooltipNames(id)) do
+        if pair[2] ~= shown then
+            tooltip:AddLine("|cff999999" .. pair[1] .. "|r " .. pair[2], 0.85, 0.85, 0.85)
+            added = added + 1
+            if mode == "one" then break end
+        end
+    end
+    if added > 0 then tooltip:Show() end   -- пересчитать размер подсказки
+end
+
+local function HookTooltips()
+    if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and Enum.TooltipDataType then
+        TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, function(tooltip, data)
+            AddTooltipNames(tooltip, data and data.id)
+        end)
+    else
+        for _, tt in ipairs({ GameTooltip, ItemRefTooltip, ShoppingTooltip1, ShoppingTooltip2 }) do
+            if tt and tt.HookScript then
+                tt:HookScript("OnTooltipSetItem", function(self)
+                    local _, link = self:GetItem()
+                    AddTooltipNames(self, link and tonumber(link:match("item:(%d+)")))
+                end)
+            end
+        end
+    end
+end
+pcall(HookTooltips)
+
+-- Alt нажали или отпустили: перерисовать открытую подсказку
+local function RefreshTooltipForAlt()
+    if TooltipMode() ~= "alt" or not GameTooltip:IsShown() then return end
+    local owner = GameTooltip:GetOwner()
+    local onEnter = owner and owner.GetScript and owner:GetScript("OnEnter")
+    if onEnter then pcall(onEnter, owner) end
+end
+
+local ApplyUILanguage   -- определена ниже; нужна панели настроек
+
 local panel = CreateFrame("Frame", "PolyglotOptionsPanel")
 panel.name = "Polyglot"
 
@@ -903,6 +993,7 @@ pHelp:SetJustifyH("LEFT")
 pHelp:SetText(T("opt_help"))
 
 local checks, statuses = {}, {}
+local ttChecks, uiChecks = {}, {}   -- радиокнопки: режим подсказок и язык интерфейса аддона
 local minimapCheck
 
 local function RefreshPanel()
@@ -926,12 +1017,15 @@ local function RefreshPanel()
         statuses[loc]:SetText(text)
     end
     if minimapCheck then minimapCheck:SetChecked(not db.hideMinimap) end
+    for mode, cb in pairs(ttChecks) do cb:SetChecked(TooltipMode() == mode) end
+    for key, cb in pairs(uiChecks) do cb:SetChecked((db.uiLang or "auto") == key) end
 end
 
 for i, info in ipairs(LOCALES) do
     local loc, label = info[1], info[2]
     local cb = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
-    cb:SetPoint("TOPLEFT", pHelp, "BOTTOMLEFT", 0, -10 - (i - 1) * 28)
+    cb:SetSize(26, 26)
+    cb:SetPoint("TOPLEFT", pHelp, "BOTTOMLEFT", 0, -10 - (i - 1) * 24)
     local text = panel:CreateFontString(nil, "ARTWORK", loc == "enUS" and "GameFontDisable" or "GameFontNormal")
     text:SetPoint("LEFT", cb, "RIGHT", 4, 0)
     text:SetText(label .. " (" .. loc .. ")")
@@ -953,7 +1047,8 @@ for i, info in ipairs(LOCALES) do
 end
 
 minimapCheck = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
-minimapCheck:SetPoint("TOPLEFT", pHelp, "BOTTOMLEFT", 0, -10 - #LOCALES * 28 - 10)
+minimapCheck:SetSize(26, 26)
+minimapCheck:SetPoint("TOPLEFT", pHelp, "BOTTOMLEFT", 0, -10 - #LOCALES * 24 - 8)
 local minimapLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
 minimapLabel:SetPoint("LEFT", minimapCheck, "RIGHT", 4, 0)
 minimapLabel:SetText(T("opt_minimap"))
@@ -961,7 +1056,61 @@ minimapCheck:SetScript("OnClick", function(self)
     db.hideMinimap = (not self:GetChecked()) or nil
     ApplyMinimapVisibility()
 end)
-panel:SetScript("OnShow", RefreshPanel)
+
+-- Подсказки предметов: выбор режима (радиокнопки)
+local ttHeader = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+ttHeader:SetPoint("TOPLEFT", minimapCheck, "BOTTOMLEFT", 0, -14)
+ttHeader:SetText(T("opt_tooltip"))
+local ttLabels = {}
+local prevTt = ttHeader
+for _, mode in ipairs(TOOLTIP_MODES) do
+    local cb = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
+    cb:SetSize(26, 26)
+    cb:SetPoint("TOPLEFT", prevTt, "BOTTOMLEFT", 0, prevTt == ttHeader and -4 or 0)
+    local label = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    label:SetPoint("LEFT", cb, "RIGHT", 4, 0)
+    label:SetText(T("tt_" .. mode))
+    cb:SetScript("OnClick", function()
+        db.tooltip = mode
+        RefreshPanel()
+    end)
+    ttChecks[mode], ttLabels[mode] = cb, label
+    prevTt = cb
+end
+
+-- Язык интерфейса аддона: один выбор для окна поиска и настроек (кнопка RU/EN в окне меняет то же значение).
+-- Три варианта в одну строку, чтобы не удлинять страницу настроек.
+local uiHeader = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+uiHeader:SetPoint("TOPLEFT", prevTt, "BOTTOMLEFT", 0, -14)
+uiHeader:SetText(T("opt_uilang"))
+local UI_CHOICES = { { "auto", nil }, { "enUS", "enUS" }, { "ruRU", "ruRU" } }
+local function UIChoiceText(key)
+    return key == "enUS" and "English" or key == "ruRU" and "Русский" or T("ui_auto")
+end
+local uiLabels = {}
+local prevUi, prevUiLabel
+for _, choice in ipairs(UI_CHOICES) do
+    local key = choice[1]
+    local cb = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
+    cb:SetSize(26, 26)
+    if prevUiLabel then
+        cb:SetPoint("LEFT", prevUiLabel, "RIGHT", 24, 0)
+    else
+        cb:SetPoint("TOPLEFT", uiHeader, "BOTTOMLEFT", 0, -4)
+    end
+    local label = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    label:SetPoint("LEFT", cb, "RIGHT", 4, 0)
+    label:SetText(UIChoiceText(key))
+    cb:SetScript("OnClick", function()
+        db.uiLang = choice[2]
+        ApplyUILanguage()
+    end)
+    uiChecks[key], uiLabels[key] = cb, label
+    prevUi, prevUiLabel = cb, label
+end
+
+-- при каждом открытии настроек все подписи применяются заново (язык мог смениться из окна поиска или командой)
+panel:SetScript("OnShow", function() ApplyUILanguage() end)
 
 if Settings and Settings.RegisterCanvasLayoutCategory and Settings.RegisterAddOnCategory then
     local ok, category = pcall(Settings.RegisterCanvasLayoutCategory, panel, panel.name)
@@ -1055,7 +1204,7 @@ function Polyglot_Toggle() ToggleWindow() end
 ---------------------------------------------------------------------------
 -- Язык интерфейса: по языку клиента или выбран кнопкой в углу окна
 ---------------------------------------------------------------------------
-local function ApplyUILanguage()
+ApplyUILanguage = function()
     SetUILanguage(db.uiLang or GetLocale())
     title:SetText(T("title"))
     searchBtn:SetText(T("find"))
@@ -1063,6 +1212,10 @@ local function ApplyUILanguage()
     pTitle:SetText(T("opt_title"))
     pHelp:SetText(T("opt_help"))
     minimapLabel:SetText(T("opt_minimap"))
+    ttHeader:SetText(T("opt_tooltip"))
+    uiHeader:SetText(T("opt_uilang"))
+    for mode, label in pairs(ttLabels) do label:SetText(T("tt_" .. mode)) end
+    for key, label in pairs(uiLabels) do label:SetText(UIChoiceText(key)) end
     BINDING_NAME_POLYGLOT_TOGGLE = T("binding")
     uiBtn:SetText(CURRENT == STRINGS.ruRU and "RU" or "EN")
     UpdateModeText()
@@ -1168,6 +1321,7 @@ local loader = CreateFrame("Frame")
 loader:RegisterEvent("ADDON_LOADED")
 loader:RegisterEvent("GET_ITEM_INFO_RECEIVED")
 loader:RegisterEvent("PLAYER_LOGIN")
+loader:RegisterEvent("MODIFIER_STATE_CHANGED")
 loader:SetScript("OnEvent", function(_, event, arg1, arg2)
     if event == "ADDON_LOADED" then
         if arg1 ~= ADDON_NAME then return end
@@ -1194,6 +1348,8 @@ loader:SetScript("OnEvent", function(_, event, arg1, arg2)
         local function onLogin() OldAddonWarning(); ShowWelcome(); CheckClientBuild() end
         -- небольшая пауза, чтобы сообщения не потерялись среди других при входе
         if C_Timer and C_Timer.After then C_Timer.After(4, onLogin) else onLogin() end
+    elseif event == "MODIFIER_STATE_CHANGED" then
+        if arg1 == "LALT" or arg1 == "RALT" then RefreshTooltipForAlt() end
     elseif event == "GET_ITEM_INFO_RECEIVED" then
         for i = 1, ROWS_COUNT do
             local row = rows[i]

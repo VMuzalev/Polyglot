@@ -133,6 +133,20 @@ PRINTED = {}
 print = function(...) PRINTED[#PRINTED+1] = table.concat({...}, " ") end
 C_Timer = { After = function(_, f) f() end }
 IsShiftKeyDown = function() return SHIFT end
+ALT = false
+IsAltKeyDown = function() return ALT end
+TT_CB = nil
+Enum = { TooltipDataType = { Item = 0 } }
+TooltipDataProcessor = { AddTooltipPostCall = function(_, fn) TT_CB = fn end }
+TT_TITLE = ""
+FakeTTTextLeft1 = { GetText = function() return TT_TITLE end }
+function NewTT(owner)
+    return { lines = {}, shows = 0, owner = owner,
+        AddLine = function(self, text) self.lines[#self.lines + 1] = text end,
+        Show = function(self) self.shows = self.shows + 1 end,
+        GetOwner = function(self) return self.owner end,
+        GetName = function() return "FakeTT" end }
+end
 SHIFT = false
 LOADED = {}
 OLD_ADDONS = {}
@@ -177,7 +191,7 @@ Settings = {
 EXPOSE = [
     ("local rows = {}", "rows = {}"), ("local frame = CreateFrame", "frame = CreateFrame"),
     ("local edit = CreateFrame", "edit = CreateFrame"), ("local status = frame", "status = frame"),
-    ("local pageText = frame", "pageText = frame"), ("local checks, statuses = {}, {}", "checks, statuses = {}, {}"),
+    ("local pageText = frame", "pageText = frame"),
     ("local rowH, perPage", "rowH, perPage"), ("local function Search", "function Search"),
     ("local function normalize", "function normalize"), ("local DoSearch ", "DoSearch = nil -- "),
     ("local db = ", "db = "), ("local panel = CreateFrame", "panel = CreateFrame"),
@@ -185,7 +199,7 @@ EXPOSE = [
     ("local favBtn", "favBtn"), ("local viewFav", "viewFav"), ("local uiBtn", "uiBtn"), ("local langBtn = CreateFrame", "langBtn = CreateFrame"),
     ("local title = frame:CreateFontString", "title = frame:CreateFontString"),
     ("local minimapLabel = panel", "minimapLabel = panel"),
-    ("local mapPin\n", "mapPin = nil\n"), ("local tab = \"items\"", "tab = \"items\""), ("local tabItemsBtn", "tabItemsBtn"), ("local tabPlacesBtn", "tabPlacesBtn"),
+    ("local mapPin\n", "mapPin = nil\n"), ("local uiHeader = ", "uiHeader = "), ("local ttLabels = {}", "ttLabels = {}"), ("local uiLabels = {}", "uiLabels = {}"), ("local ttHeader = ", "ttHeader = "), ("local ttChecks, uiChecks = {}, {}", "ttChecks, uiChecks = {}, {}"), ("local checks, statuses = {}, {}", "checks, statuses = {}, {}"), ("local tab = \"items\"", "tab = \"items\""), ("local tabItemsBtn", "tabItemsBtn"), ("local tabPlacesBtn", "tabPlacesBtn"),
 ]
 
 
@@ -193,7 +207,7 @@ class Game:
     """Аддон Polyglot, загруженный в настоящий Lua 5.1 с заглушками игрового API."""
 
     def __init__(self, modules_dir, locale="ruRU", saved=None, client_build="70205", data_build="1.60.1.70205",
-                 old_addon=False, old_saved=None):
+                 old_addon=False, old_saved=None, legacy_tooltip=False):
         self.lua = lua51.LuaRuntime(unpack_returned_tuples=True)
         L = self.lua
 
@@ -208,6 +222,12 @@ class Game:
         g.read_module = read_module
         g.CLIENT_LOCALE = locale
         L.execute(STUBS)
+        if legacy_tooltip:   # старый способ: без TooltipDataProcessor, через HookScript("OnTooltipSetItem")
+            L.execute("TooltipDataProcessor = nil; LEGACY_LINES = {}; LEGACY_LINK = nil\n"
+                      "GameTooltip.HookScript = function(_, n, f) LEGACY_HOOK = f end\n"
+                      "GameTooltip.GetItem = function() return 'x', LEGACY_LINK end\n"
+                      "GameTooltip.GetOwner = function() return nil end; GameTooltip.GetName = function() return 'FakeTT' end\n"
+                      "GameTooltip.AddLine = function(_, t) LEGACY_LINES[#LEGACY_LINES + 1] = t end")
         L.execute("GetLocale = function() return CLIENT_LOCALE end")
         L.execute(f'GetBuildInfo = function() return "1.60.1", "{client_build}", "Oct 1 2026", 16001 end')
         if data_build:
