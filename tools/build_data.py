@@ -377,6 +377,41 @@ def load_places(build, locales):
     return kinds, by_locale, maps
 
 
+SPELL_JUNK = re.compile(r"\b(dnd|unused|not used|do not use|obsolete|deprecated|placeholder|test)\b|\(old\)|^zz|^<|^\[|^\(", re.I)
+
+
+def parse_spells(text):
+    """SpellName: {ID: название}. Служебные и пустые записи пропускаются."""
+    out = {}
+    for row in _table_rows(text, "Name_lang"):
+        name = row["Name_lang"].strip()
+        if not row["ID"].isdigit() or not name or JUNK_NAME.search(name) or SPELL_JUNK.search(name):
+            continue
+        out[int(row["ID"])] = name
+    return out
+
+
+def load_spells(build, locales):
+    """Заклинания необязательны: при проблеме с английским возвращается пустой результат.
+    Ранги и копии с одинаковыми названиями на всех языках оставляются один раз (наименьший ID)."""
+    by_locale = {}
+    for loc in locales:
+        try:
+            by_locale[loc] = parse_spells(download(build, loc, table="SpellName"))
+        except (urllib.error.URLError, ValueError, TimeoutError) as e:
+            print(f"  заклинания {loc}: нет данных ({e})")
+    if not by_locale.get("enUS"):
+        print("ВНИМАНИЕ: английские названия заклинаний не получены, вкладка «Заклинания» работать не будет")
+        return {}
+    keep, seen = set(), set()
+    for sid in sorted(by_locale["enUS"]):
+        sig = tuple(by_locale.get(loc, {}).get(sid, "") for loc in locales)
+        if sig not in seen:
+            seen.add(sig)
+            keep.add(sid)
+    return {loc: {i: n for i, n in d.items() if i in keep} for loc, d in by_locale.items()}
+
+
 def lua_str(s):
     s = s.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", " ")
     return '"' + s + '"'
@@ -394,7 +429,7 @@ def read_interface():
     return "16001"
 
 
-def write_module(loc, label, names, interface, places=None, kinds=None, maps=None):
+def write_module(loc, label, names, interface, places=None, kinds=None, maps=None, spells=None):
     folder = os.path.join(MODULES_DIR, f"Polyglot_{loc}")
     os.makedirs(folder, exist_ok=True)
 
@@ -414,7 +449,7 @@ def write_module(loc, label, names, interface, places=None, kinds=None, maps=Non
     with open(os.path.join(folder, "Data.lua"), "w", encoding="utf-8", newline="\n") as f:
         f.write("PolyglotData = PolyglotData or {}\n")
         if not names:
-            f.write(f'PolyglotData["{loc}"] = {{ n = {{}}, l = {{}}, p = {{}}, pl = {{}}, k = {{}}, mp = {{}}, empty = true }}\n')
+            f.write(f'PolyglotData["{loc}"] = {{ n = {{}}, l = {{}}, p = {{}}, pl = {{}}, k = {{}}, mp = {{}}, s = {{}}, sl = {{}}, empty = true }}\n')
             return 0
         ids = sorted(i for i, n in names.items() if n)
         f.write("local n, l = {}, {}\n")
@@ -438,7 +473,16 @@ def write_module(loc, label, names, interface, places=None, kinds=None, maps=Non
                 if maps and key in maps:
                     f.write(f"mp[{key}]={{{','.join(str(v) for v in maps[key])}}}\n")
             f.write("end)\n")
-        f.write(f'PolyglotData["{loc}"] = {{ n = n, l = l, p = p, pl = pl, k = k, mp = mp }}\n')
+        # заклинания: s названия, sl в нижнем регистре
+        f.write("local s, sl = {}, {}\n")
+        sids = sorted(spells or {})
+        for start in range(0, len(sids), CHUNK):
+            f.write("run(function()\n")
+            for sid in sids[start:start + CHUNK]:
+                name = spells[sid]
+                f.write(f"s[{sid}]={lua_str(name)}\nsl[{sid}]={lua_str(name.lower())}\n")
+            f.write("end)\n")
+        f.write(f'PolyglotData["{loc}"] = {{ n = n, l = l, p = p, pl = pl, k = k, mp = mp, s = s, sl = sl }}\n')
         return len(ids)
 
 
@@ -613,10 +657,13 @@ def main():
     interface = read_interface()
     place_kinds, place_names, place_maps = load_places(forever_build, list(LOCALES))
     print(f"Мест (зоны, подземелья): {len(place_kinds)}, с картой: {len(place_maps)}")
+    spell_names = load_spells(forever_build, list(LOCALES))
+    print(f"Заклинаний: {len(spell_names.get('enUS', {}))}")
     for loc, label in LOCALES.items():
         count = write_module(loc, label, names_by_locale[loc], interface,
                              places=place_names.get(loc), kinds=place_kinds if loc == "enUS" else None,
-                             maps=place_maps if loc == "enUS" else None)
+                             maps=place_maps if loc == "enUS" else None,
+                             spells=spell_names.get(loc))
         print(f"  {loc}: {count if count else 'пустой модуль'}")
 
     with open(os.path.join(ROOT, "Build.lua"), "w", encoding="utf-8", newline="\n") as f:

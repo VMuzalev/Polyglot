@@ -51,6 +51,12 @@ def fake_download(count=9000, overrides=None, fail=()):
                     f"0,Azeroth,{word} World,0,0,0,-1\n33,Shadowfang,{word} 33,1,-5000,-900,0\n"
                     f"409,MoltenCore,{word} 409,2,0,0,-1\n"
                     f"13,test,{word} Test,1,0,0,-1\n30,AlteracValley,{word} 30,3,0,0,-1\n")
+        if table == "SpellName":
+            word = {"enUS": "Spell", "ruRU": "Заклинание", "deDE": "Zauber"}.get(locale, locale)
+            rows = ["ID,Name_lang"]
+            rows += [f"{i},{word} {i}" for i in range(1, 6)]
+            rows += [f"6,{word} 5", "7,Fireball (OLD)", "8,", "9,DND Spell", f"10,{word} 10 Test"]   # ранг-дубль, служебные и пустая
+            return "\n".join(rows) + "\n"
         if table == "UiMap":
             return "Name_lang,ID,ParentUiMapID,Type\nEastern,1415,0,2\nZoneOne,1426,1415,3\nBigZone,1500,1415,3\nAzeroth,947,0,1\n"
         if table == "UiMapAssignment":
@@ -199,7 +205,7 @@ EXPOSE = [
     ("local favBtn", "favBtn"), ("local viewFav", "viewFav"), ("local uiBtn", "uiBtn"), ("local langBtn = CreateFrame", "langBtn = CreateFrame"),
     ("local title = frame:CreateFontString", "title = frame:CreateFontString"),
     ("local minimapLabel = panel", "minimapLabel = panel"),
-    ("local mapPin\n", "mapPin = nil\n"), ("local uiHeader = ", "uiHeader = "), ("local ttLabels = {}", "ttLabels = {}"), ("local uiLabels = {}", "uiLabels = {}"), ("local ttHeader = ", "ttHeader = "), ("local ttChecks, uiChecks = {}, {}", "ttChecks, uiChecks = {}, {}"), ("local checks, statuses = {}, {}", "checks, statuses = {}, {}"), ("local tab = \"items\"", "tab = \"items\""), ("local tabItemsBtn", "tabItemsBtn"), ("local tabPlacesBtn", "tabPlacesBtn"),
+    ("local mapPin\n", "mapPin = nil\n"), ("local uiHeader = ", "uiHeader = "), ("local ttLabels = {}", "ttLabels = {}"), ("local uiLabels = {}", "uiLabels = {}"), ("local ttHeader = ", "ttHeader = "), ("local ttChecks, uiChecks = {}, {}", "ttChecks, uiChecks = {}, {}"), ("local checks, statuses = {}, {}", "checks, statuses = {}, {}"), ("local tab = \"items\"", "tab = \"items\""), ("local tabItemsBtn", "tabItemsBtn"), ("local tabPlacesBtn", "tabPlacesBtn"), ("local tabSpellsBtn", "tabSpellsBtn"),
 ]
 
 

@@ -30,7 +30,9 @@ local loadReason = {}   -- локаль -> почему модуль не заг
 local STRINGS = {
     enUS = {
         title = "Polyglot",
-        tab_items = "Items", tab_places = "Places",
+        tab_items = "Items", tab_places = "Places", tab_spells = "Spells",
+        enter_spell = "Enter a spell name", no_spells = "No spell data in this version of the database. Update the addon.",
+        spell_hint = "Shift+click: link in chat", help_9 = "/pg spell <name> - search spells",
         enter_place = "Enter a zone or dungeon name",
         pin_remove = "Click: remove the mark",
         place_hint = "Click: show on the map", no_map = "No map data for this place.",
@@ -94,7 +96,9 @@ local STRINGS = {
     },
     ruRU = {
         title = "Polyglot",
-        tab_items = "Предметы", tab_places = "Места",
+        tab_items = "Предметы", tab_places = "Места", tab_spells = "Заклинания",
+        enter_spell = "Введите название заклинания", no_spells = "В этой версии базы нет данных о заклинаниях. Обновите аддон.",
+        spell_hint = "Shift+клик: ссылка в чат", help_9 = "/pg spell <название> - поиск заклинаний",
         enter_place = "Введите название зоны или подземелья",
         pin_remove = "Клик: убрать метку",
         place_hint = "Клик: показать на карте", no_map = "Для этого места нет данных карты.",
@@ -393,13 +397,18 @@ tabItemsBtn:SetPoint("TOPLEFT", 24, -44)
 local tabPlacesBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
 tabPlacesBtn:SetSize(110, 24)
 tabPlacesBtn:SetPoint("LEFT", tabItemsBtn, "RIGHT", 4, 0)
+local tabSpellsBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+tabSpellsBtn:SetSize(120, 24)
+tabSpellsBtn:SetPoint("LEFT", tabPlacesBtn, "RIGHT", 4, 0)
 
 local function UpdateTabs()
     tabItemsBtn:SetText(T("tab_items"))
     tabPlacesBtn:SetText(T("tab_places"))
+    tabSpellsBtn:SetText(T("tab_spells"))
     -- выбранная вкладка недоступна для нажатия (так видно, где вы)
     if tab == "items" then tabItemsBtn:Disable() else tabItemsBtn:Enable() end
     if tab == "places" then tabPlacesBtn:Disable() else tabPlacesBtn:Enable() end
+    if tab == "spells" then tabSpellsBtn:Disable() else tabSpellsBtn:Enable() end
 end
 
 local PLACE_ICON = "Interface\\Icons\\INV_Misc_Map_01"
@@ -455,6 +464,12 @@ for i = 1, ROWS_COUNT do
             return
         end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        if tab == "spells" then
+            pcall(GameTooltip.SetHyperlink, GameTooltip, "spell:" .. self.id)
+            GameTooltip:AddLine(T("spell_hint"), 0.6, 0.6, 0.6)
+            GameTooltip:Show()
+            return
+        end
         pcall(GameTooltip.SetHyperlink, GameTooltip, "item:" .. self.id)
         if self.link then
             GameTooltip:AddLine(T("link_hint"), 0.6, 0.6, 0.6)
@@ -465,6 +480,12 @@ for i = 1, ROWS_COUNT do
     row:SetScript("OnClick", function(self)
         if tab == "places" then
             if self.id then OpenPlaceMap(self.id) end
+            return
+        end
+        if tab == "spells" then
+            if self.link and IsModifiedClick and IsModifiedClick("CHATLINK") and ChatEdit_InsertLink then
+                ChatEdit_InsertLink(self.link)
+            end
             return
         end
         if self.link and HandleModifiedItemClick then HandleModifiedItemClick(self.link) end
@@ -506,7 +527,7 @@ local function FavoriteCount()
 end
 
 local function UpdateFavBtn()
-    if tab == "places" then favBtn:Hide() else favBtn:Show() end
+    if tab ~= "items" then favBtn:Hide() else favBtn:Show() end
     favBtn:SetText(viewFav and T("fav_back") or T("favorites", FavoriteCount()))
 end
 
@@ -593,10 +614,47 @@ local function FillPlaceRow(row)
     return true
 end
 
+local function SpellIcon(id)
+    local icon
+    if C_Spell and C_Spell.GetSpellInfo then
+        local ok, info = pcall(C_Spell.GetSpellInfo, id)
+        if ok and type(info) == "table" then icon = info.iconID end
+    end
+    if not icon and GetSpellInfo then
+        local ok, _, _, ic = pcall(GetSpellInfo, id)
+        if ok then icon = ic end
+    end
+    return icon
+end
+
+local function FillSpellRow(row)
+    local id = row.id
+    local lines = {}
+    for _, loc in ipairs(ActiveLocales()) do
+        local d = PolyglotData[loc]
+        local nm = d and d.s and d.s[id]
+        if nm and nm ~= "" then lines[#lines + 1] = { loc, nm } end
+    end
+    row.icon:SetTexture(SpellIcon(id) or "Interface\\Icons\\INV_Misc_QuestionMark")
+    local uiLoc = (CURRENT == STRINGS.ruRU) and "ruRU" or "enUS"
+    local best = lines[1]
+    for _, pair in ipairs(lines) do
+        if pair[1] == uiLoc then best = pair break end
+    end
+    row.link = best and ("|cff71d5ff|Hspell:" .. id .. "|h[" .. best[2] .. "]|h|r") or nil
+    local out = { best and ("|cffffd100" .. best[2] .. "|r  |cff888888" .. id .. "|r") or "" }
+    for _, pair in ipairs(lines) do
+        out[#out + 1] = "|cffaaaaaa" .. pair[1] .. ":|r " .. pair[2]
+    end
+    SetRowText(row, out)
+    return true
+end
+
 local function FillRow(row)
     local id = row.id
     if not id then return true end
     if tab == "places" then return FillPlaceRow(row) end
+    if tab == "spells" then return FillSpellRow(row) end
     local g = GetGameInfo(id)
 
     local names = {}   -- { {локаль, название}, ... } только по включённым языкам
@@ -730,6 +788,21 @@ DoSearch = function()
             return
         end
         ShowResults(Search(q, db.strict, "pl"))
+        return
+    end
+    if tab == "spells" then
+        local en = PolyglotData.enUS
+        if not (en.s and next(en.s)) then
+            ShowResults({})
+            status:SetText("|cffff8080" .. T("no_spells") .. "|r")
+            return
+        end
+        if q == "" then
+            emptyKey = "enter_spell"
+            ShowResults({})
+            return
+        end
+        ShowResults(Search(q, db.strict, "sl"))
         return
     end
     if viewFav then
@@ -879,6 +952,7 @@ local function SetTab(name)
 end
 tabItemsBtn:SetScript("OnClick", function() SetTab("items") end)
 tabPlacesBtn:SetScript("OnClick", function() SetTab("places") end)
+tabSpellsBtn:SetScript("OnClick", function() SetTab("spells") end)
 UpdateTabs()
 
 -- При открытии окна сразу подгружаем данные включённых языков (один раз за сессию)
@@ -1282,7 +1356,7 @@ end
 
 local function PrintHelp()
     Print(T("help_title"))
-    for i = 1, 8 do print("  " .. T("help_" .. i)) end
+    for i = 1, 9 do print("  " .. T("help_" .. i)) end
 end
 
 -- Приветствие один раз после установки
@@ -1390,6 +1464,14 @@ SlashCmdList["POLYGLOT"] = function(msg)
         frame:Show()
         SetTab("places")
         edit:SetText(placeArg)
+        DoSearch()
+        return
+    end
+    local spellArg = msg:match("^[Ss][Pp][Ee][Ll][Ll]%s*(.*)$")
+    if spellArg then
+        frame:Show()
+        SetTab("spells")
+        edit:SetText(spellArg)
         DoSearch()
         return
     end

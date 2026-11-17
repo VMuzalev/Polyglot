@@ -303,3 +303,28 @@ class FindItem(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpellData(unittest.TestCase):
+    def test_parse_skips_junk(self):
+        text = "ID,Name_lang\n1,Fireball\n2,Fireball (OLD)\n3,\n4,DND Thing\n5,Frost Nova\n"
+        self.assertEqual(b.parse_spells(text), {1: "Fireball", 5: "Frost Nova"})
+
+    def test_ranks_with_same_names_kept_once(self):
+        import helpers
+        with helpers.build_workspace(helpers.fake_download(count=200)):
+            res = b.load_spells("b", ["enUS", "ruRU"])
+        self.assertIn(5, res["enUS"])
+        self.assertNotIn(6, res["enUS"])
+        self.assertNotIn(7, res["enUS"])
+
+    def test_spells_optional(self):
+        import helpers
+        with helpers.build_workspace(helpers.fake_download(count=200)):
+            real = b.download
+            def boom(build, locale, attempts=3, table="ItemSparse"):
+                if table == "SpellName":
+                    raise ValueError("нет")
+                return real(build, locale, attempts, table)
+            b.download = boom
+            self.assertEqual(b.load_spells("b", ["enUS"]), {})

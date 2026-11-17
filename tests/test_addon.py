@@ -345,6 +345,58 @@ class HelpAndWelcome(AddonTestCase):
         self.assertEqual(len(g.printed()), before)
 
 
+class Spells(AddonTestCase):
+    """Вкладка «Заклинания»."""
+
+    def shown(self, g):
+        return g.ev("(function() local n = 0 for i = 1, #rows do if rows[i]._shown then n = n + 1 end end return n end)()")
+
+    def test_spell_search_by_other_language(self):
+        g = self.game(locale="ruRU", saved="{ langs = {ruRU = true, enUS = true}, seenWelcome = true }")
+        g.slash("spell заклинание 3")
+        self.assertEqual(g.ev("tab"), "spells")
+        self.assertEqual(self.shown(g), 1)
+        text = g.ev("rows[1].text._text")
+        self.assertIn("Spell 3", text)
+        self.assertIn("Заклинание 3", text)
+
+    def test_rank_duplicate_and_junk_not_found(self):
+        g = self.game(locale="enUS")
+        g.slash("spell fireball")
+        self.assertEqual(self.shown(g), 0)
+        g.slash("spell dnd")
+        self.assertEqual(self.shown(g), 0)
+        g.slash("spell spell 5")
+        self.assertEqual(self.shown(g), 1)
+
+    def test_spell_ids_do_not_leak_into_items_or_places(self):
+        g = self.game(locale="enUS")
+        count, _ = g.search("spell 2")
+        self.assertEqual(count, 0)
+        g.slash("zone spell")
+        self.assertEqual(self.shown(g), 0)
+
+    def test_tab_button_and_favorites_hidden(self):
+        g = self.game(locale="enUS")
+        g.slash("")
+        g.lua.execute("tabSpellsBtn._scripts.OnClick()")
+        self.assertEqual(g.ev("tab"), "spells")
+        self.assertFalse(g.ev("favBtn._shown"))
+        self.assertIn("spell name", g.ev("status._text"))
+
+    def test_row_has_spell_link_and_tooltip(self):
+        g = self.game(locale="enUS")
+        g.slash("spell spell 2")
+        self.assertIn("Hspell:2", g.ev("rows[1].link"))
+
+    def test_old_data_without_spells_shows_message(self):
+        g = self.game(locale="enUS")
+        g.slash("Item 5")
+        g.lua.execute("PolyglotData.enUS.s = nil")
+        g.slash("spell anything")
+        self.assertIn("No spell data", g.ev("status._text"))
+
+
 class Places(AddonTestCase):
     """Вкладка «Места»: зоны и подземелья."""
 
